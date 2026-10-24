@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""devteam: start a director-led team of coding agents for a project in herdr.
+
+  devteam up [path] [--new]     scaffold .devteam/, start the director and the hearth runner
+  devteam down [path] [--force] stop the team, remove its worktrees, close its workspace
+  devteam status [path]         show the director, the roster and task counts
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+BLUEPRINT = Path(__file__).resolve().parent.parent
+HEARTH_DIR = Path(os.environ.get("HEARTH_DIR", "~/workspace/hearth")).expanduser()
+HEARTH_ENV = ("HEARTH_URL", "HEARTH_TOKEN", "HEARTH_HUMAN")
+
+SCAFFOLD = {
+    ".gitignore": "session.json\n",
+    "vision.md": "# Vision\n\n## Goals\n\n## Non-goals\n\n## Constraints\n\n## Decisions\n",
+    "context.md": "# Context\n",
+    "team.md": "# Team\n\n| Agent | Role | Pane | Worktree | Task | Status |\n|---|---|---|---|---|---|\n",
+    "questions.md": "# Questions\n",
+    "log.md": "# Log\n",
+    "roles/.gitkeep": "",
+    "tasks/.gitkeep": "",
+}
+
+
+def die(msg):
+    print(f"devteam: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(*cmd, cwd=None, check=True):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode:
+        die(f"{' '.join(cmd[:3])} failed: {(p.stderr or p.stdout).strip()}")
+    return p
+
+
+def herdr(*args, check=True):
+    """Run a herdr command and return its parsed result, or the error object when check is False."""
+    p = run("herdr", *args, check=False)
+    if p.returncode:
+        try:
+            err = json.loads(p.stderr)["error"]
+        except (json.JSONDecodeError, KeyError):
+            err = {"code": "unknown", "message": (p.stderr or p.stdout).strip()}
+        if check:
+            die(f"herdr {args[0]} {args[1]}: {err['message']}")
+        return {"error": err}
+    return json.loads(p.stdout)["result"] if p.stdout.strip() else {}
+
+
+def load_config():
+    return tomllib.loads((BLUEPRINT / "team.toml").read_text())
+
+
+def check_deps(cfg):
+    missing = [t for t in ("herdr", "git", "node") if not shutil.which(t)]
+    for role in cfg["roles"].values():
+        if not shutil.which(role["kind"]) and role["kind"] not in missing:
+            missing.append(role["kind"])
+    missing += [v for v in HEARTH_ENV if not os.environ.get(v)]
+    for f in ("runner/index.ts", "mcp/index.ts"):
+        if not (HEARTH_DIR / f).is_file():
+            missing.append(f"{HEARTH_DIR}/{f} (set HEARTH_DIR)")
+    if missing:
+        die("missing: " + ", ".join(missing))
+    kind = cfg["roles"][cfg["director"]]["kind"]
+    if kind != "claude":
+        die(f"director kind must be claude, got {kind}. Codex drops its current turn when a worker reports.")
+
+
+def slug(repo):
+    s = re.sub(r"[^a-z0-9-]+", "-", repo.name.lower()).strip("-")
+    if not s or not s[0].isalpha():
+        s = "p-" + s
+    return s[:16].rstrip("-")
+
+
+def agent_args(role):
+    args = []
+    if role.get("model"):
+        args += ["--model" if role["kind"] == "claude" else "-m", role["model"]]
+    return args + role.get("args", [])
+
+
+def find_agent(name):
+    for a in herdr("agent", "list")["agents"]:
+        if a.get("name") == name:
+            return a
+    return None
+
+
+def repo_root(path, new):
+    repo = Path(path or ".").expanduser().resolve()
+    if new:
+        if repo.exists() and any(repo.iterdir()):
+            die(f"{repo} exists and is not empty")
+        repo.mkdir(parents=True, exist_ok=True)
+        run("git", "init", "-q", cwd=repo)
+        shutil.copy(BLUEPRINT / "templates/AGENTS.md", repo / "AGENTS.md")
+        run("git", "add", "AGENTS.md", cwd=repo)
+        run("git", "commit", "-q", "-m", "Initial commit", cwd=repo)
+        return repo
+    p = run("git", "rev-parse", "--show-toplevel", cwd=repo, check=False)
+    if p.returncode:
+        die(f"{repo} is not a git repo. Use --new to create a project.")
+    repo = Path(p.stdout.strip())
+    if run("git", "rev-parse", "--verify", "-q", "HEAD", cwd=repo, check=False).returncode:
+        die(f"{repo} has no commits. Worktrees need at least one.")
+    return repo
+
+
+def cmd_up(path, new):
+    cfg = load_config()
+    check_deps(cfg)
+    repo = repo_root(path, new)
+    prefix = slug(repo) + "-"
+    name = prefix + "director"
+    if find_agent(name):
+        cmd_status(str(repo))
+        return
+
+    dt = repo / ".devteam"
+    for rel, text in SCAFFOLD.items():
+        f = dt / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if not f.exists():
+            f.write_text(text)
+
+    env = [a for v in ("HEARTH_URL", "HEARTH_TOKEN") for a in ("--env", f"{v}={os.environ[v]}")]
+    ws = herdr("workspace", "create", "--cwd", str(repo), "--label", f"devteam: {prefix[:-1]}", *env, "--no-focus")
+    ws_id, pane = ws["workspace"]["workspace_id"], ws["root_pane"]["pane_id"]
+    session = {"workspace": ws_id, "director": name, "director_pane": pane}
+    (dt / "session.json").write_text(json.dumps(session, indent=2) + "\n")
+
+    mcp = json.dumps({"mcpServers": {"hearth": {"command": "node", "args": [str(HEARTH_DIR / "mcp/index.ts")]}}})
+    role = cfg["roles"][cfg["director"]]
+    started = herdr("agent", "start", name, "--kind", role["kind"], "--pane", pane, "--timeout", "120000",
+                    "--", *agent_args(role), "--mcp-config", mcp, check=False)
+    if "error" in started:
+        if started["error"]["code"] not in ("agent_not_ready", "timeout"):
+            die(f"director did not start: {started['error']['message']}")
+        print(f"The director is waiting on a startup dialog in pane {pane}. Answer it there. Waiting up to 5 minutes.")
+        if "error" in herdr("agent", "wait", name, "--until", "idle", "--timeout", "300000", check=False):
+            die(f"director never became ready. Check pane {pane}, then run devteam up again.")
+
+    runner = herdr("pane", "split", "--pane", pane, "--direction", "right", "--ratio", "0.75", "--cwd", str(HEARTH_DIR),
+                   *env, "--env", f"RUNNER_HERDR_AGENT={name}", "--env", "RUNNER_TRIGGER=owner", "--no-focus")
+    session["runner_pane"] = runner["pane"]["pane_id"]
+    herdr("pane", "run", session["runner_pane"], "node runner/index.ts")
+    (dt / "session.json").write_text(json.dumps(session, indent=2) + "\n")
+
+    herdr("agent", "prompt", name, "\n".join([
+        "You are the director of the dev team for this project.",
+        f"Read your role file and follow it: {BLUEPRINT}/roles/director.md",
+        f"Blueprint: {BLUEPRINT} (team settings in team.toml, base roles in roles/)",
+        f"Project: {repo} ({'new project' if new else 'existing repo'})",
+        f"Your agent name: {name}. Worker name prefix: {prefix}",
+        f"Your pane: {pane}. Project workspace: {ws_id}.",
+        f"The human on hearth: @{os.environ['HEARTH_HUMAN']}",
+        "Start now.",
+    ]))
+    print(f"director {name} started in {pane} (workspace {ws_id}), hearth runner in {session['runner_pane']}")
+
+
+def cmd_down(path, force):
+    repo = repo_root(path, False)
+    dt = repo / ".devteam"
+    sf = dt / "session.json"
+    if not sf.exists():
+        die(f"no team is running for {repo}")
+    session = json.loads(sf.read_text())
+    prefix = slug(repo) + "-"
+
+    failed = []
+    for wt in herdr("worktree", "list", "--cwd", str(repo))["worktrees"]:
+        if not wt.get("is_linked_worktree") or not wt.get("branch", "").startswith("devteam/"):
+            continue
+        if not wt.get("workspace_id"):
+            failed.append(f"{wt['path']} (no herdr workspace, remove with git worktree remove)")
+            continue
+        r = herdr("worktree", "remove", "--workspace", wt["workspace_id"], *(["--force"] if force else []), check=False)
+        if "error" in r:
+            failed.append(f"{wt['path']}: {r['error']['message']}")
+
+    for a in herdr("agent", "list")["agents"]:
+        if a.get("name", "").startswith(prefix) and a["workspace_id"] != session["workspace"]:
+            herdr("pane", "close", a["pane_id"], check=False)
+    r = herdr("workspace", "close", session["workspace"], check=False)
+    if "error" in r and r["error"]["code"] != "workspace_not_found":
+        failed.append(f"workspace {session['workspace']}: {r['error']['message']}")
+
+    sf.unlink()
+    (dt / "team.md").write_text(SCAFFOLD["team.md"])
+    if failed:
+        print("not removed:\n  " + "\n  ".join(failed), file=sys.stderr)
+        if not force:
+            print("worktrees with uncommitted changes need devteam down --force, which discards them", file=sys.stderr)
+        sys.exit(1)
+    print(f"team for {repo} is down. .devteam/tasks and logs kept.")
+
+
+def cmd_status(path):
+    repo = repo_root(path, False)
+    dt = repo / ".devteam"
+    if not dt.is_dir():
+        die(f"{repo} has no .devteam/")
+    name = slug(repo) + "-director"
+    a = find_agent(name)
+    print(f"director {name}: {a['agent_status'] if a else 'not running'}")
+    print((dt / "team.md").read_text().rstrip())
+    counts = {}
+    for f in sorted((dt / "tasks").glob("*.md")):
+        m = re.search(r"^status:\s*(\S+)", f.read_text(), re.M)
+        s = m.group(1) if m else "unknown"
+        counts[s] = counts.get(s, 0) + 1
+    print("\ntasks: " + (", ".join(f"{k} {v}" for k, v in counts.items()) or "none"))
+    q = len(re.findall(r"^## q\d+ \(open\)", (dt / "questions.md").read_text(), re.M)) if (dt / "questions.md").exists() else 0
+    print(f"open questions: {q}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="devteam", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    up = sub.add_parser("up")
+    up.add_argument("path", nargs="?")
+    up.add_argument("--new", action="store_true", help="create a new git repo at path")
+    down = sub.add_parser("down")
+    down.add_argument("path", nargs="?")
+    down.add_argument("--force", action="store_true", help="remove worktrees even with uncommitted changes")
+    st = sub.add_parser("status")
+    st.add_argument("path", nargs="?")
+    a = ap.parse_args()
+    if a.cmd == "up":
+        cmd_up(a.path, a.new)
+    elif a.cmd == "down":
+        cmd_down(a.path, a.force)
+    else:
+        cmd_status(a.path)
+
+
+if __name__ == "__main__":
+    main()
