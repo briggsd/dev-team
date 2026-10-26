@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """devteam: start a director-led team of coding agents for a project in herdr or Orca.
 
-  devteam up [path] [--new] [--backend B]  scaffold .devteam/, start the director, the heartbeat, and the hearth runner in herdr
+  devteam up [path] [--new] [--backend B]  scaffold .devteam/, start the director, the heartbeat, and hearth when configured
   devteam down [path] [--force]            stop the team, remove its worktrees, close its panes
   devteam status [path]                    show the director, the roster and task counts
 
@@ -115,8 +115,9 @@ class Herdr:
         return r.get("error", {}).get("code") != "agent_prompt_stalled"
 
     def run_beside(self, session, cwd, command, env, title):
-        """Run a command in a new pane below the hearth runner and return the pane."""
-        p = call("herdr", "pane", "split", "--pane", session["runner_pane"], "--direction", "down", "--cwd", str(cwd),
+        """Run a command in a new pane below the hearth runner, or beside the director without one, and return the pane."""
+        beside = session.get("runner_pane") or session["agents"][session["director"]]["pane"]
+        p = call("herdr", "pane", "split", "--pane", beside, "--direction", "down", "--cwd", str(cwd),
                  *env, "--no-focus")["pane"]["pane_id"]
         call("herdr", "pane", "run", p, command)
         return p
@@ -261,13 +262,19 @@ def role_settings(f):
     return tomllib.loads(m.group(1)) if m else {}
 
 
-def check_tools(backend):
-    missing = [t for t in (backend, "git", "node") if not shutil.which(t)]
-    missing += [v for v in HEARTH_ENV if not os.environ.get(v)]
-    files = ("runner/index.ts", "mcp/index.ts") if backend == "herdr" else ("mcp/index.ts",)
-    for f in files:
-        if not (HEARTH_DIR / f).is_file():
-            missing.append(f"{HEARTH_DIR}/{f} (set HEARTH_DIR)")
+def use_hearth():
+    """Hearth is on when any HEARTH_ variable is set, so a partial setup fails loudly instead of being ignored."""
+    return any(os.environ.get(v) for v in HEARTH_ENV)
+
+
+def check_tools(backend, hearth):
+    missing = [t for t in (backend, "git", *(["node"] if hearth else [])) if not shutil.which(t)]
+    if hearth:
+        missing += [v for v in HEARTH_ENV if not os.environ.get(v)]
+        files = ("runner/index.ts", "mcp/index.ts") if backend == "herdr" else ("mcp/index.ts",)
+        for f in files:
+            if not (HEARTH_DIR / f).is_file():
+                missing.append(f"{HEARTH_DIR}/{f} (set HEARTH_DIR)")
     if missing:
         die("missing: " + ", ".join(missing))
 
@@ -345,7 +352,8 @@ def agent(session, name):
 
 def cmd_up(path, new, backend_name):
     backend_name = backend_name or detect_backend()
-    check_tools(backend_name)
+    hearth = use_hearth()
+    check_tools(backend_name, hearth)
     repo = repo_root(path, new)
     prefix = slug(repo) + "-"
     name = prefix + "director"
@@ -372,13 +380,16 @@ def cmd_up(path, new, backend_name):
     cfg, roles = load_project(dt)
 
     b = BACKENDS[backend_name]()
-    env = [a for v in ("HEARTH_URL", "HEARTH_TOKEN") for a in ("--env", f"{v}={os.environ[v]}")]
+    env = [a for v in ("HEARTH_URL", "HEARTH_TOKEN") for a in ("--env", f"{v}={os.environ[v]}")] if hearth else []
     session, pane = b.open(repo, f"devteam: {prefix[:-1]}", env)
     session.update(backend=b.name, director=name, agents={})
-    hearth = {v: os.environ[v] for v in ("HEARTH_URL", "HEARTH_TOKEN")}
-    mcp = json.dumps({"mcpServers": {"hearth": {"command": "node", "args": [str(HEARTH_DIR / "mcp/index.ts")], "env": hearth}}})
+    args = agent_args(roles[cfg["director"]])
+    if hearth:
+        mcp_env = {v: os.environ[v] for v in ("HEARTH_URL", "HEARTH_TOKEN")}
+        args += ["--mcp-config", json.dumps({"mcpServers": {"hearth": {
+            "command": "node", "args": [str(HEARTH_DIR / "mcp/index.ts")], "env": mcp_env}}})]
     role = roles[cfg["director"]]
-    ref = b.start(name, role["kind"], [*agent_args(role), "--mcp-config", mcp], pane, repo)
+    ref = b.start(name, role["kind"], args, pane, repo)
     session["agents"][name] = {"role": cfg["director"], "kind": role["kind"], "exit": role.get("exit"), "ref": ref,
                                "pane": pane, "worktree": None, "task": None}
     save_session(repo, session)
@@ -387,7 +398,7 @@ def cmd_up(path, new, backend_name):
         if not b.wait(ref, 300000):
             die("director never became ready. Check its terminal, then run devteam down and devteam up again.")
 
-    if b.name == "herdr":
+    if hearth and b.name == "herdr":
         runner = call("herdr", "pane", "split", "--pane", pane, "--direction", "right", "--ratio", "0.75",
                       "--cwd", str(HEARTH_DIR), *env, "--env", f"RUNNER_HERDR_AGENT={name}", "--env",
                       "RUNNER_TRIGGER=owner", "--no-focus")
@@ -404,7 +415,8 @@ def cmd_up(path, new, backend_name):
         f"Devteam CLI: {Path(__file__).resolve()}",
         f"Project: {repo} ({'new project' if new else 'existing repo'})",
         f"Your agent name: {name}. Worker name prefix: {prefix}",
-        f"The human on hearth: @{os.environ['HEARTH_HUMAN']}",
+        f"The human on hearth: @{os.environ['HEARTH_HUMAN']}" if hearth else
+        "No hearth: talk to the human in this terminal. They read it and answer by typing to you.",
         "Start now.",
     ])
     # A prompt sent right after a startup dialog closes can be dropped, so resend until the director starts on it.
@@ -415,7 +427,9 @@ def cmd_up(path, new, backend_name):
     else:
         die(f"the director never picked up its kickoff. Check its {b.name} terminal, then run devteam down and up.")
     print(f"director {name} started in {b.name}, heartbeat every {cfg.get('heartbeat_minutes', 10)} minutes")
-    if b.name == "herdr":
+    if not hearth:
+        print("no hearth: the director asks its questions in its own terminal. Answer there.")
+    elif b.name == "herdr":
         print(f"hearth runner in {session['runner_pane']}")
     else:
         print("no hearth runner: it supports herdr only, so hearth DMs reach the director only when it wakes")

@@ -12,9 +12,9 @@ Start a team of coding agents on any project with one command. A director agent 
 - herdr (0.9.3 or later) or Orca (1.4.240 or later)
 - git
 - python3 3.11 or later (runs `bin/devteam`)
-- node (runs the hearth MCP server and runner)
+- node, with hearth only (runs the hearth MCP server and runner)
 - The agent CLIs named in the role catalog (default: `claude`, `codex`)
-- hearth: an agent account for the director, its MCP server, and its runner. Env: `HEARTH_URL`, `HEARTH_TOKEN`, `HEARTH_HUMAN` (the human's hearth username), `HEARTH_DIR` (default `~/workspace/hearth`)
+- hearth, optional: an agent account for the director, its MCP server, and its runner. Setting any `HEARTH_` variable turns it on, and then all of these are required. Without hearth, the director talks to the human in its own terminal. Env: `HEARTH_URL`, `HEARTH_TOKEN`, `HEARTH_HUMAN` (the human's hearth username), `HEARTH_DIR` (default `~/workspace/hearth`)
 
 No other tools. `devteam up` checks each dependency and exits with the name of anything missing.
 
@@ -93,15 +93,15 @@ Agent names are unique per herdr server, so every agent is named `<project-slug>
 
 ### `devteam up [path] [--new]`
 
-1. Check the backend CLI, git, node and the hearth env.
+1. Check the backend CLI and git, plus node and the hearth env when hearth is on.
 2. If `--new`: create `path`, run `git init`, copy `templates/AGENTS.md`, make an initial commit.
 3. Create missing `.devteam/` files, and copy missing `team.toml` and role files from the blueprint. Never modify files outside `.devteam/` in an existing repo.
 4. Check every agent CLI named in the project's roles, and that the director role is `kind = "claude"`.
 5. Create the director's place (see Backends).
-6. Start the director with the hearth MCP server, configured with `HEARTH_URL` and `HEARTH_TOKEN`. If a startup dialog appears, wait up to 5 minutes for the human to answer it.
-7. herdr only: start the hearth runner in a pane: `RUNNER_HERDR_AGENT=<slug>-director RUNNER_TRIGGER=owner node <hearth>/runner/index.ts`.
+6. Start the director, with the hearth MCP server configured from `HEARTH_URL` and `HEARTH_TOKEN` when hearth is on. If a startup dialog appears, wait up to 5 minutes for the human to answer it.
+7. herdr with hearth only: start the hearth runner in a pane: `RUNNER_HERDR_AGENT=<slug>-director RUNNER_TRIGGER=owner node <hearth>/runner/index.ts`.
 8. Start the heartbeat.
-9. Send the kickoff: the project's director role path, team settings, the devteam CLI path, project path, agent name, worker prefix and the human's hearth username. Resend up to 3 times if the director does not start working on it. The first prompt after a startup dialog closes can be dropped.
+9. Send the kickoff: the project's director role path, team settings, the devteam CLI path, project path, agent name, worker prefix, and the human's hearth username or `No hearth`. Resend up to 3 times if the director does not start working on it. The first prompt after a startup dialog closes can be dropped.
 
 Running `up` on a project whose director is already live prints its status and exits.
 
@@ -164,10 +164,11 @@ The director wakes only on events: a worker report or a hearth message. If every
 5. A task merges only after every review in its `reviews` list and its test record a pass, or the skipped stage has a logged reason.
 6. The director can write a project role, use it to hire a worker, and log why.
 7. `devteam down` leaves no agents, worktrees, or herdr workspace behind, and keeps `.devteam/tasks/`.
-8. A decision outside `vision.md` adds an entry to `questions.md`, sets only the affected tasks to `waiting`, and DMs the human on hearth. Unaffected tasks keep moving. A reply in the DM wakes an idle director, and the answer is appended to `vision.md`.
+8. A decision outside `vision.md` adds an entry to `questions.md`, sets only the affected tasks to `waiting`, and DMs the human on hearth, or asks in the director's terminal without hearth. Unaffected tasks keep moving. A reply in the DM wakes an idle director, and the answer is appended to `vision.md`.
 9. A worker finishing a task wakes an idle director without human input.
 10. With an idle director and a stalled worker, the heartbeat wakes the director within `heartbeat_minutes`, and the director resends or replaces the worker.
-11. Missing the chosen backend (`herdr` or `orca`), `git`, a cataloged agent CLI, or `HEARTH_URL`/`HEARTH_TOKEN` makes `devteam up` exit non-zero, naming the missing tool.
+11. Missing the chosen backend (`herdr` or `orca`), `git`, a cataloged agent CLI, or, when any `HEARTH_` variable is set, any other `HEARTH_` variable makes `devteam up` exit non-zero, naming the missing tool.
 12. After `up`, no file in `.devteam/` references the blueprint path, and the kickoff names only project files and the devteam CLI.
 13. A task is announced only after main passes the definition of done.
 14. Criteria 1 to 7 and 9 to 13 pass on both backends. On Orca, criterion 8 passes except the wake step (R3).
+15. With no `HEARTH_` variables set, `devteam up` starts the director without hearth, and the director asks for the vision in its terminal.
