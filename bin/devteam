@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """devteam: start a director-led team of coding agents for a project in herdr.
 
-  devteam up [path] [--new]     scaffold .devteam/, start the director and the hearth runner
+  devteam up [path] [--new]     scaffold .devteam/, start the director, the hearth runner and the heartbeat
   devteam down [path] [--force] stop the team, remove its worktrees, close its workspace
   devteam status [path]         show the director, the roster and task counts
 """
@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -23,11 +24,12 @@ HEARTH_ENV = ("HEARTH_URL", "HEARTH_TOKEN", "HEARTH_HUMAN")
 SCAFFOLD = {
     ".gitignore": "session.json\n",
     "vision.md": "# Vision\n\n## Goals\n\n## Non-goals\n\n## Constraints\n\n## Decisions\n",
-    "context.md": "# Context\n",
+    "context.md": "# Context\n\n## Checks\n\n## Definition of done\n\n## Known flaky\n\n## Conventions\n",
+    "state.md": "# Director state\n",
+    "retro.md": "# Retro\n",
     "team.md": "# Team\n\n| Agent | Role | Pane | Worktree | Task | Status |\n|---|---|---|---|---|---|\n",
     "questions.md": "# Questions\n",
     "log.md": "# Log\n",
-    "roles/.gitkeep": "",
     "tasks/.gitkeep": "",
 }
 
@@ -58,24 +60,35 @@ def herdr(*args, check=True):
     return json.loads(p.stdout)["result"] if p.stdout.strip() else {}
 
 
-def load_config():
-    return tomllib.loads((BLUEPRINT / "team.toml").read_text())
+def role_settings(f):
+    """TOML frontmatter between +++ lines at the top of a role file, or {}."""
+    m = re.match(r"\+\+\+\n(.*?)\n\+\+\+\n", f.read_text(), re.S)
+    return tomllib.loads(m.group(1)) if m else {}
 
 
-def check_deps(cfg):
+def check_tools():
     missing = [t for t in ("herdr", "git", "node") if not shutil.which(t)]
-    for role in cfg["roles"].values():
-        if not shutil.which(role["kind"]) and role["kind"] not in missing:
-            missing.append(role["kind"])
     missing += [v for v in HEARTH_ENV if not os.environ.get(v)]
     for f in ("runner/index.ts", "mcp/index.ts"):
         if not (HEARTH_DIR / f).is_file():
             missing.append(f"{HEARTH_DIR}/{f} (set HEARTH_DIR)")
     if missing:
         die("missing: " + ", ".join(missing))
-    kind = cfg["roles"][cfg["director"]]["kind"]
-    if kind != "claude":
-        die(f"director kind must be claude, got {kind}. Codex drops its current turn when a worker reports.")
+
+
+def load_project(dt):
+    """The project's team settings and role settings. The blueprint is not read after scaffolding."""
+    cfg = tomllib.loads((dt / "team.toml").read_text())
+    roles = {f.stem: role_settings(f) for f in sorted((dt / "roles").glob("*.md"))}
+    director = roles.get(cfg["director"])
+    if director is None:
+        die(f"no director role at {dt}/roles/{cfg['director']}.md")
+    if director.get("kind") != "claude":
+        die(f"director kind must be claude, got {director.get('kind')}. Codex drops its current turn when a worker reports.")
+    missing = sorted({r["kind"] for r in roles.values() if r.get("kind") and not shutil.which(r["kind"])})
+    if missing:
+        die("missing agent CLIs: " + ", ".join(missing))
+    return cfg, director
 
 
 def slug(repo):
@@ -120,8 +133,7 @@ def repo_root(path, new):
 
 
 def cmd_up(path, new):
-    cfg = load_config()
-    check_deps(cfg)
+    check_tools()
     repo = repo_root(path, new)
     prefix = slug(repo) + "-"
     name = prefix + "director"
@@ -135,6 +147,14 @@ def cmd_up(path, new):
         f.parent.mkdir(parents=True, exist_ok=True)
         if not f.exists():
             f.write_text(text)
+    # The project gets its own copy of the settings and roles, so nothing points back at the blueprint.
+    if not (dt / "team.toml").exists():
+        shutil.copy(BLUEPRINT / "team.toml", dt / "team.toml")
+    (dt / "roles").mkdir(exist_ok=True)
+    for f in (BLUEPRINT / "roles").glob("*.md"):
+        if not (dt / "roles" / f.name).exists():
+            shutil.copy(f, dt / "roles" / f.name)
+    cfg, role = load_project(dt)
 
     env = [a for v in ("HEARTH_URL", "HEARTH_TOKEN") for a in ("--env", f"{v}={os.environ[v]}")]
     ws = herdr("workspace", "create", "--cwd", str(repo), "--label", f"devteam: {prefix[:-1]}", *env, "--no-focus")
@@ -143,7 +163,6 @@ def cmd_up(path, new):
     (dt / "session.json").write_text(json.dumps(session, indent=2) + "\n")
 
     mcp = json.dumps({"mcpServers": {"hearth": {"command": "node", "args": [str(HEARTH_DIR / "mcp/index.ts")]}}})
-    role = cfg["roles"][cfg["director"]]
     started = herdr("agent", "start", name, "--kind", role["kind"], "--pane", pane, "--timeout", "120000",
                     "--", *agent_args(role), "--mcp-config", mcp, check=False)
     if "error" in started:
@@ -157,19 +176,46 @@ def cmd_up(path, new):
                    *env, "--env", f"RUNNER_HERDR_AGENT={name}", "--env", "RUNNER_TRIGGER=owner", "--no-focus")
     session["runner_pane"] = runner["pane"]["pane_id"]
     herdr("pane", "run", session["runner_pane"], "node runner/index.ts")
+    beat = herdr("pane", "split", "--pane", session["runner_pane"], "--direction", "down", "--cwd", str(repo), "--no-focus")
+    session["heartbeat_pane"] = beat["pane"]["pane_id"]
+    herdr("pane", "run", session["heartbeat_pane"],
+          f"'{Path(__file__).resolve()}' heartbeat {name} {prefix} --minutes {cfg.get('heartbeat_minutes', 10)}")
     (dt / "session.json").write_text(json.dumps(session, indent=2) + "\n")
 
-    herdr("agent", "prompt", name, "\n".join([
+    kickoff = "\n".join([
         "You are the director of the dev team for this project.",
-        f"Read your role file and follow it: {BLUEPRINT}/roles/director.md",
-        f"Blueprint: {BLUEPRINT} (team settings in team.toml, base roles in roles/)",
+        f"Read your role file and follow it: {dt}/roles/{cfg['director']}.md",
+        f"Team settings: {dt}/team.toml. Roles: {dt}/roles/",
         f"Project: {repo} ({'new project' if new else 'existing repo'})",
         f"Your agent name: {name}. Worker name prefix: {prefix}",
         f"Your pane: {pane}. Project workspace: {ws_id}.",
         f"The human on hearth: @{os.environ['HEARTH_HUMAN']}",
         "Start now.",
-    ]))
-    print(f"director {name} started in {pane} (workspace {ws_id}), hearth runner in {session['runner_pane']}")
+    ])
+    # A prompt sent right after a startup dialog closes can be dropped, so resend until the director starts on it.
+    for _ in range(3):
+        r = herdr("agent", "prompt", name, kickoff, "--wait", "--timeout", "15000", check=False)
+        if r.get("error", {}).get("code") != "agent_prompt_stalled":
+            break
+        time.sleep(3)
+    else:
+        die(f"the director never picked up its kickoff. Check pane {pane}, then run devteam down and up.")
+    print(f"director {name} started in {pane} (workspace {ws_id}), hearth runner in {session['runner_pane']}, "
+          f"heartbeat in {session['heartbeat_pane']}")
+
+
+def cmd_heartbeat(name, prefix, minutes):
+    """Wake an idle director every few minutes while it has workers, so it notices stalled workers."""
+    while True:
+        time.sleep(minutes * 60)
+        agents = herdr("agent", "list", check=False).get("agents", [])
+        director = next((a for a in agents if a.get("name") == name), None)
+        if director is None:
+            continue
+        workers = [a for a in agents if a.get("name", "").startswith(prefix) and a.get("name") != name]
+        if workers and director["agent_status"] in ("idle", "done"):
+            herdr("agent", "prompt", name, "heartbeat: check every worker for stalls", check=False)
+            print(time.strftime("%H:%M"), f"woke {name}, {len(workers)} workers", flush=True)
 
 
 def cmd_down(path, force):
@@ -239,11 +285,17 @@ def main():
     down.add_argument("--force", action="store_true", help="remove worktrees even with uncommitted changes")
     st = sub.add_parser("status")
     st.add_argument("path", nargs="?")
+    hb = sub.add_parser("heartbeat", help=argparse.SUPPRESS)
+    hb.add_argument("name")
+    hb.add_argument("prefix")
+    hb.add_argument("--minutes", type=float, default=10)
     a = ap.parse_args()
     if a.cmd == "up":
         cmd_up(a.path, a.new)
     elif a.cmd == "down":
         cmd_down(a.path, a.force)
+    elif a.cmd == "heartbeat":
+        cmd_heartbeat(a.name, a.prefix, a.minutes)
     else:
         cmd_status(a.path)
 
