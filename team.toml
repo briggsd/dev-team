@@ -1,41 +1,14 @@
-max_agents = 4               # workers running at once, director excluded
-catalog = "roles"            # path to base catalog, relative to this file
-director = "director"        # role used for the director, must be kind = "claude"
+# Copied to <project>/.devteam/team.toml by devteam up. The project copy is the one in use.
 
-# Fields per role:
-#   kind      herdr agent kind
+max_agents = 4               # workers running at once, director excluded
+heartbeat_minutes = 10       # how often the director is woken while it has workers
+director = "director"        # role file in .devteam/roles/ used for the director, must be kind = "claude"
+
+# Role settings live in TOML frontmatter (between +++ lines) at the top of each role file:
+#   kind      agent CLI: claude or codex
 #   model     passed as --model (claude) or -m (codex)
 #   args      extra agent CLI arguments
 #   reset     command that clears context between tasks
+#   exit      command that quits the agent
 #   worktree  true: runs in its own git worktree on branch devteam/<task-id>
 #   when      one line telling the director when to hire this role
-
-[roles.director]
-kind = "claude"
-model = "claude-opus-5-5"
-args = ["--permission-mode", "auto"]
-worktree = false
-when = "Plans, hires, assigns, judges and merges. Started by devteam up, never hired."
-
-[roles.builder]
-kind = "claude"
-model = "claude-opus-5-5"
-args = ["--permission-mode", "auto"]
-reset = "/clear"
-worktree = true
-when = "Implements one task in its own worktree."
-
-[roles.reviewer]
-kind = "codex"
-args = ["--approve-for-me"]  # implies the workspace-write sandbox. Codex rejects it combined with -s.
-reset = "/new"
-worktree = false
-when = "Reviews a finished task's diff for correctness and simplicity."
-
-[roles.tester]
-kind = "claude"
-model = "claude-sonnet-5-5"
-args = ["--permission-mode", "auto"]
-reset = "/clear"
-worktree = false
-when = "Runs and extends tests for a finished task."

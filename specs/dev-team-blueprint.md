@@ -1,6 +1,6 @@
 # Dev Team Blueprint
 
-Status: draft, 2026-10-24. Updated 2026-10-26 for the Orca backend.
+Status: draft, updated 2026-10-25
 Open items: none
 
 ## Goal
@@ -12,7 +12,7 @@ Start a team of coding agents on any project with one command. A director agent 
 - herdr (0.9.3 or later) or Orca (1.4.240 or later)
 - git
 - python3 3.11 or later (runs `bin/devteam`)
-- node (runs the hearth MCP server, and the runner under herdr)
+- node (runs the hearth MCP server and runner)
 - The agent CLIs named in the role catalog (default: `claude`, `codex`)
 - hearth: an agent account for the director, its MCP server, and its runner. Env: `HEARTH_URL`, `HEARTH_TOKEN`, `HEARTH_HUMAN` (the human's hearth username), `HEARTH_DIR` (default `~/workspace/hearth`)
 
@@ -38,9 +38,9 @@ No other tools. `devteam up` checks each dependency and exits with the name of a
 
 ```
 dev-team/
-  bin/devteam            # CLI: up, down, status, and agent commands
-  team.toml              # defaults: limits, director role
-  roles/                 # base catalog
+  bin/devteam            # CLI: up, down, status, agent commands (and the internal heartbeat)
+  team.toml              # default team settings: max_agents, heartbeat_minutes, director
+  roles/                 # base roles, settings in +++ TOML frontmatter
     director.md
     builder.md
     reviewer.md
@@ -49,21 +49,24 @@ dev-team/
     AGENTS.md            # starter file for new projects
 ```
 
-## Project layout
+The blueprint is a template. `devteam up` copies `team.toml` and `roles/` into the project the first time, and only copies files the project does not have yet. From then on the director and `devteam` read only the project's copies. Nothing in a project points back at the blueprint, so a project can change its roles freely and blueprint updates never leak into a running project.
 
-`devteam up` creates this in the target repo:
+## Project layout
 
 ```
 .devteam/
-  vision.md              # the decided vision: goals, non-goals, constraints, decisions
-  context.md             # repo facts the director gathers: stack, build, test commands
+  team.toml              # team settings, copied from the blueprint
+  roles/                 # all roles the project uses, copied from the blueprint, then owned by the project
+  vision.md              # goals, non-goals, constraints, decisions
+  context.md             # rulebook for workers: Checks, Definition of done, Known flaky, Conventions
+  state.md               # everything the director needs to resume after a restart or compaction
   team.md                # live roster: agent name, role, worktree, task, status
-  roles/                 # project roles, override catalog roles of the same name
   tasks/<id>.md          # one file per task
-  tasks/<id>/            # handoff files: spec.md, build.md, review.md, test.md
-  questions.md           # open questions for the human, with answers when given
+  tasks/<id>/            # handoffs: build.md, review-<role>.md, test.md
+  questions.md           # questions for the human, open and closed
+  retro.md               # one entry per finished task, each ending in an outcome
   log.md                 # director's decisions, append only
-  session.json           # backend, and each agent's terminal ref, worktree and task, gitignored
+  session.json           # backend, and each agent's terminal ref, worktree, task and exit command, gitignored
 ```
 
 ## CLI
@@ -81,30 +84,34 @@ Agent names are unique per herdr server, so every agent is named `<project-slug>
 | Worktree | `herdr worktree create --branch devteam/<id>` | `orca worktree create --name devteam/<id>`, then `git branch -m devteam/<id>`, since Orca prefixes the branch with the git user |
 | Other agent | split of the director's pane | new terminal tab in the repo's worktree |
 | Prompt | `herdr agent prompt` | `orca terminal send --text --enter` |
+| Kickoff check | `herdr agent prompt --wait`, resend on `agent_prompt_stalled` | `orca terminal send --wait-submit 15`, resend without `turn_started` |
 | Status | `herdr agent get` | `orca terminal wait --for tui-idle --timeout-ms 3000`: satisfied is idle, `blockedReason` is blocked, timeout is working |
 | Read | `herdr agent read --source recent-unwrapped` | `orca terminal read` |
 | Remove worktree | `herdr worktree remove --workspace <id>`, which also closes the agent's pane | `orca worktree rm`. Orca deletes the branch only when it can prove it is merged |
-| Hearth runner | started in a split pane | not started, see R3 |
+| Hearth runner | started in a pane | not started, see R3 |
+| Heartbeat | pane below the runner | its own terminal in the repo's worktree |
 
 ### `devteam up [path] [--new]`
 
-1. Check dependencies.
+1. Check the backend CLI, git, node and the hearth env.
 2. If `--new`: create `path`, run `git init`, copy `templates/AGENTS.md`, make an initial commit.
-3. Create `.devteam/` if missing. Never modify files outside it in an existing repo.
-4. Create the director's place (see Backends), cwd = repo root.
-5. Start the director as `<slug>-director`, with the hearth MCP server configured from `HEARTH_URL` and `HEARTH_TOKEN`. If a startup dialog holds it, wait up to 5 minutes for the human to answer it.
-6. herdr only: split a pane and start the hearth runner in it: `RUNNER_HERDR_AGENT=<slug>-director RUNNER_TRIGGER=owner node <hearth>/runner/index.ts`.
-7. Prompt the director with its role file, the catalog path, the devteam CLI path, and the project path.
+3. Create missing `.devteam/` files, and copy missing `team.toml` and role files from the blueprint. Never modify files outside `.devteam/` in an existing repo.
+4. Check every agent CLI named in the project's roles, and that the director role is `kind = "claude"`.
+5. Create the director's place (see Backends).
+6. Start the director with the hearth MCP server, configured with `HEARTH_URL` and `HEARTH_TOKEN`. If a startup dialog appears, wait up to 5 minutes for the human to answer it.
+7. herdr only: start the hearth runner in a pane: `RUNNER_HERDR_AGENT=<slug>-director RUNNER_TRIGGER=owner node <hearth>/runner/index.ts`.
+8. Start the heartbeat.
+9. Send the kickoff: the project's director role path, team settings, the devteam CLI path, project path, agent name, worker prefix and the human's hearth username. Resend up to 3 times if the director does not start working on it. The first prompt after a startup dialog closes can be dropped.
 
 Running `up` on a project whose director is already live prints its status and exits.
 
 ### `devteam down [path] [--force]`
 
-Stop every agent in `session.json`, remove their worktrees and any other `devteam/` worktree, close the herdr workspace. Task files and logs stay.
+Exit every agent in `session.json`, remove their worktrees and any other `devteam/` worktree, close the heartbeat and the herdr workspace, reset `team.md`. Everything else in `.devteam/` stays. Without `--force`, worktrees with uncommitted changes are kept and reported.
 
 ### `devteam status [path]`
 
-Print the director's status, `team.md` and task counts by status.
+Print the director's state, `team.md`, task counts by status and the number of open questions.
 
 ### Agent commands
 
@@ -112,140 +119,37 @@ The director and workers run these. They find the project from the cwd, includin
 
 | Command | Does |
 |---|---|
-| `devteam hire <name> <role> [--task <id>]` | Starts a worker with the role's kind, model and args. A `worktree = true` role gets a worktree on `devteam/<id>`. Prints its status and worktree. |
+| `devteam hire <name> <role> [--task <id>]` | Starts a worker with the role's settings. A `worktree = true` role gets a worktree on `devteam/<id>`. Prints its status and worktree. |
 | `devteam prompt <name> <text>` | Submits a prompt without waiting. |
-| `devteam key <name> <key>...` | Presses `up`, `down`, `enter` or `esc`, for startup dialogs. |
+| `devteam key <name> <key>...` | Presses `up`, `down`, `enter` or `esc`, for dialogs and interrupts. |
 | `devteam read <name> [--lines N]` | Prints recent terminal output. |
 | `devteam list` | Prints each agent's role, task, status and worktree. |
-| `devteam fire <name> [--force]` | Sends the agent's exit, closes its terminal, removes its worktree. |
+| `devteam fire <name> [--force]` | Sends the role's `exit` command, closes its terminal, removes its worktree. |
 
-## team.toml
+### Heartbeat
 
-```toml
-max_agents = 4               # workers running at once, director excluded
-catalog = "roles"            # path to base catalog
-director = "director"        # role used for the director
-
-[roles.builder]
-kind = "claude"
-model = "claude-opus-5-5"
-reset = "/clear"             # command that clears context between tasks
-worktree = true
-when = "Implements one task in its own worktree."
-
-[roles.reviewer]
-kind = "codex"
-reset = "/new"
-worktree = false             # reads the builder's worktree
-when = "Reviews a finished task's diff for correctness and simplicity."
-
-[roles.tester]
-kind = "claude"
-model = "claude-sonnet-5-5"
-reset = "/clear"
-worktree = false
-when = "Runs and extends tests for a finished task."
-```
-
-A project role in `.devteam/roles/<name>.md` may carry the same fields as TOML frontmatter. Missing fields fall back to the catalog entry of the same name.
+The director wakes only on events: a worker report or a hearth message. If every worker stalls, for example after the Mac sleeps, no event arrives. The heartbeat closes that gap. Every `heartbeat_minutes`, if the director is idle and has workers, it prompts the director with `heartbeat`. The director then reads every worker's screen and treats one whose screen has not changed since the last check as stalled.
 
 ## Director
 
-### Rules
+`roles/director.md` is the full specification of the director's behavior. Summary:
 
-1. Never edits code, runs builds, or runs tests. Writes only inside `.devteam/`.
-2. Owns alignment with `vision.md`. Every task, hire, custom role, and merge must serve it.
-3. The only agent that changes a task's status or edits `team.md`.
-4. Merges a task only after its reviewer and tester both pass it.
-5. Records every hire, release, custom role, and merge in `log.md` with one line of reasoning.
-
-### Startup
-
-1. On an existing repo, read README, `AGENTS.md`/`CLAUDE.md`, and build/test config. Write `.devteam/context.md`.
-2. If `vision.md` is missing or too thin to plan from, work with the human to write it.
-3. Break the vision into tasks.
-
-### Hiring a worker
-
-1. Pick a role from `.devteam/roles/`, then the catalog. If none fits, write a project role and log why.
-2. `devteam hire <name> <role> --task <task-id>`.
-3. Prompt with the role file and the task path.
-4. Add a row to `team.md`.
-
-### Assigning work
-
-1. `devteam prompt <name> "<task path>"`. It never waits, so one worker never holds up the director.
-2. Every worker's last step on a task is `devteam prompt <director> "<task-id> ready: <handoff path>"`. Every role prompt includes this step. It wakes the director if it is idle.
-3. When the director has nothing left to do, it ends its turn. A worker report or a hearth DM wakes it.
-4. On a worker report, read the task's handoff file. If missing or unclear, `devteam read <name>`.
-5. On each wake, check `devteam list` for workers that went `idle` without reporting.
-6. On `blocked`, read the agent's screen and decide. If it is a permission or approval prompt the director cannot judge, add a question (see Working with the human).
-7. A free worker gets the next queued task of its role. Send the role's `reset` command first.
-
-### Task flow
-
-```
-queued -> building -> reviewing -> testing -> merged
-             ^            |           |
-             +--- rework -+-----------+
-any state -> waiting -> back to prior state once its question is answered
-any state -> dropped
-```
-
-A task enters `building` only when every task in its `depends_on` is `merged`, it has no open question, and a worker slot is free.
-
-### Working with the human
-
-The director has full authority over tasks, hires, roles, and merges. It goes to the human only when:
-
-1. A decision is not covered by `vision.md`, or the vision is ambiguous on it.
-2. Work shows the vision itself should change.
-3. A worker is blocked on something only the human can provide, such as credentials or a permission prompt.
-
-Asking never stops the director:
-
-1. Add the question to `questions.md` with an id (`q1`, `q2`, ...) and the tasks it blocks.
-2. Set those tasks to `waiting` with `question: <id>` in their frontmatter.
-3. DM the human on hearth with `send_message`: `<project> <id>: <question>`.
-4. Keep working on every task the question does not block.
-
-The human replies in the same DM. If the director is idle, the hearth runner prompts it with the reply. If it is busy, the runner tells the human to ask again later. The director doesn't depend on that retry: on every wake it reads the DM with `read_messages` and picks up any answers. When a question has an answer, the director records it in `vision.md` under Decisions, marks it closed in `questions.md`, and returns its tasks to their prior state.
-
-The director also uses the DM for status updates the human should see, such as a merged task or a hired role. It keeps them to one line each.
-
-### Releasing a worker
-
-When no queued task fits its role, the director runs `devteam fire <name>` and deletes its `team.md` row. A builder is released when its task merges.
-
-### Limits
-
-Running workers never exceed `max_agents`. Extra tasks stay `queued` (Q5).
-
-## Task file
-
-```markdown
----
-id: t003
-title: Add login rate limiting
-status: queued
-role: builder
-owner: builder-1
-depends_on: [t001]
-branch: devteam/t003
----
-
-## Acceptance criteria
-1. ...
-```
-
-Workers write only to their task's handoff directory and, for builders, their worktree.
+1. Plans, hires, assigns, judges and merges. Never edits product code or runs builds or tests. Writes only in `.devteam/`.
+2. Keeps the project aligned with `vision.md`. Full authority otherwise. Asks the human on hearth only when the vision does not cover a decision, should change, or a worker needs something only the human can give. Asking never stops other work.
+3. Keeps `state.md` current enough to resume from it alone.
+4. Keeps `context.md` as the workers' rulebook. Checks are the exact commands workers run, matched to CI when the project has CI. Definition of done is what must pass on main after a merge: CI if present, otherwise the Checks run by a tester. Known flaky lists intermittent tests, each with a reason and tracking item.
+5. Hires from `.devteam/roles/`, edits roles or writes new ones as the project needs, and logs why.
+6. Each task lists the reviews it needs (`reviews: [...]`), which run in parallel, and its test role. A review or test may be skipped only when the change cannot affect what it checks, with the reason logged.
+7. Task flow: `queued -> building -> reviewing -> testing -> merged -> done`. A task is `done`, and announced, only after main passes the definition of done. If main fails, a fix task goes to the front of the queue and nothing else merges until main passes.
+8. After each task is done or dropped, writes a retro entry ending in a `context.md` line, a role change, or a new task. A problem seen a second time must get one of those.
+9. Never runs more than `max_agents` workers. Extra tasks queue.
 
 ## Accepted risks
 
 - **R2.** Tested 2026-10-24 (herdr 0.9.3, Claude Code 2.1.310, codex). A `herdr agent prompt` sent to a working agent is accepted by both. Claude finished its current turn, then answered the new message. Codex dropped its current turn at once and answered the new message instead. So the director must run on claude, and `devteam up` rejects any other kind for the director role. The director prompts workers only when they are idle, so the codex reviewer is not affected.
   Retested 2026-10-26 for claude in Orca 1.4.240 with `orca terminal send`. The running command was not interrupted. Claude took the queued message into the same turn and answered it. Codex was not retested in Orca.
 
-- **R3.** The hearth runner supports only herdr. Under Orca, `devteam up` starts no runner, so a hearth DM does not wake an idle director. The director still reads the DM whenever a worker report wakes it. Criterion 8's wake step fails under Orca until the runner gets an Orca engine.
+- **R3.** The hearth runner supports only herdr. Under Orca, `devteam up` starts no runner, so a hearth DM does not wake an idle director. The director still reads the DM whenever a worker report or heartbeat wakes it. Criterion 8's wake step fails under Orca until the runner gets an Orca engine.
 
 - **R4.** Orca terminal handles change when Orca restarts. After a restart, `devteam` cannot reach the team's agents. Run `devteam down` and `devteam up` again.
 
@@ -256,11 +160,14 @@ Workers write only to their task's handoff directory and, for builders, their wo
 1. `devteam up --new /tmp/x` creates a git repo with `.devteam/` and a live director in herdr or Orca, and the director asks the human for the vision.
 2. `devteam up <existing repo>` changes no files outside `.devteam/`, and the director writes `context.md`.
 3. Given a goal with two independent tasks, the director hires two builders in separate worktrees, and both run at once.
-4. With `max_agents = 1`, the second task stays `queued` until the first is merged.
-5. A task merges only after `review.md` and `test.md` both record a pass.
+4. With `max_agents = 1`, the second task stays `queued` until the first is done.
+5. A task merges only after every review in its `reviews` list and its test record a pass, or the skipped stage has a logged reason.
 6. The director can write a project role, use it to hire a worker, and log why.
 7. `devteam down` leaves no agents, worktrees, or herdr workspace behind, and keeps `.devteam/tasks/`.
 8. A decision outside `vision.md` adds an entry to `questions.md`, sets only the affected tasks to `waiting`, and DMs the human on hearth. Unaffected tasks keep moving. A reply in the DM wakes an idle director, and the answer is appended to `vision.md`.
 9. A worker finishing a task wakes an idle director without human input.
-10. Missing the chosen backend (`herdr` or `orca`), `git`, a cataloged agent CLI, or `HEARTH_URL`/`HEARTH_TOKEN` makes `devteam up` exit non-zero, naming the missing tool.
-11. Criteria 1 to 7, 9 and 10 pass on both backends. On Orca, criterion 8 passes except the wake step (R3).
+10. With an idle director and a stalled worker, the heartbeat wakes the director within `heartbeat_minutes`, and the director resends or replaces the worker.
+11. Missing the chosen backend (`herdr` or `orca`), `git`, a cataloged agent CLI, or `HEARTH_URL`/`HEARTH_TOKEN` makes `devteam up` exit non-zero, naming the missing tool.
+12. After `up`, no file in `.devteam/` references the blueprint path, and the kickoff names only project files and the devteam CLI.
+13. A task is announced only after main passes the definition of done.
+14. Criteria 1 to 7 and 9 to 13 pass on both backends. On Orca, criterion 8 passes except the wake step (R3).

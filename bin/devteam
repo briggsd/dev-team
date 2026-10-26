@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """devteam: start a director-led team of coding agents for a project in herdr or Orca.
 
-  devteam up [path] [--new] [--backend B]  scaffold .devteam/, start the director (and the hearth runner in herdr)
+  devteam up [path] [--new] [--backend B]  scaffold .devteam/, start the director, the heartbeat, and the hearth runner in herdr
   devteam down [path] [--force]            stop the team, remove its worktrees, close its panes
   devteam status [path]                    show the director, the roster and task counts
 
@@ -31,17 +31,17 @@ BLUEPRINT = Path(__file__).resolve().parent.parent
 HEARTH_DIR = Path(os.environ.get("HEARTH_DIR", "~/workspace/hearth")).expanduser()
 HEARTH_ENV = ("HEARTH_URL", "HEARTH_TOKEN", "HEARTH_HUMAN")
 NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}")
-EXIT = {"claude": "/exit", "codex": "/quit"}
 START_MS = 120000
 
 SCAFFOLD = {
     ".gitignore": "session.json\n",
     "vision.md": "# Vision\n\n## Goals\n\n## Non-goals\n\n## Constraints\n\n## Decisions\n",
-    "context.md": "# Context\n",
+    "context.md": "# Context\n\n## Checks\n\n## Definition of done\n\n## Known flaky\n\n## Conventions\n",
+    "state.md": "# Director state\n",
+    "retro.md": "# Retro\n",
     "team.md": "# Team\n\n| Agent | Role | Worktree | Task | Status |\n|---|---|---|---|---|\n",
     "questions.md": "# Questions\n",
     "log.md": "# Log\n",
-    "roles/.gitkeep": "",
     "tasks/.gitkeep": "",
 }
 
@@ -109,11 +109,28 @@ class Herdr:
     def prompt(self, ref, text):
         call("herdr", "agent", "prompt", ref, text)
 
+    def prompt_started(self, ref, text):
+        """Submit a prompt and report whether the agent started on it."""
+        r = call("herdr", "agent", "prompt", ref, text, "--wait", "--timeout", "15000", check=False)
+        return r.get("error", {}).get("code") != "agent_prompt_stalled"
+
+    def run_beside(self, session, cwd, command, env, title):
+        """Run a command in a new pane below the hearth runner and return the pane."""
+        p = call("herdr", "pane", "split", "--pane", session["runner_pane"], "--direction", "down", "--cwd", str(cwd),
+                 *env, "--no-focus")["pane"]["pane_id"]
+        call("herdr", "pane", "run", p, command)
+        return p
+
     def keys(self, ref, keys):
         call("herdr", "agent", "send-keys", ref, *keys)
 
     def read(self, ref, lines):
-        p = run("herdr", "agent", "read", ref, "--source", "recent-unwrapped", "--lines", str(lines))
+        p = run("herdr", "agent", "read", ref, "--source", "recent-unwrapped", "--lines", str(lines), check=False)
+        if p.returncode and "agent_not_idle" in p.stderr + p.stdout:
+            # herdr can capture history only while the agent is idle. A working agent gives its visible screen.
+            p = run("herdr", "agent", "read", ref, "--source", "visible")
+        elif p.returncode:
+            die(f"herdr agent read failed: {(p.stderr or p.stdout).strip()}")
         return p.stdout
 
     def close(self, agent):
@@ -191,6 +208,14 @@ class Orca:
     def prompt(self, ref, text):
         call("orca", "terminal", "send", "--terminal", ref, "--text", text, "--enter")
 
+    def prompt_started(self, ref, text):
+        r = call("orca", "terminal", "send", "--terminal", ref, "--text", text, "--enter", "--wait-submit", "15", check=False)
+        return "turn_started" in json.dumps(r)
+
+    def run_beside(self, session, cwd, command, env, title):
+        return call("orca", "terminal", "create", "--worktree", f"path:{cwd}", "--title", title,
+                    "--command", command)["terminal"]["handle"]
+
     def keys(self, ref, keys):
         for k in keys:
             if k == "enter":
@@ -211,7 +236,8 @@ class Orca:
         return r["error"]["message"] if "error" in r else None
 
     def shut(self, session):
-        return None
+        if session.get("heartbeat"):
+            call("orca", "terminal", "close", "--terminal", session["heartbeat"], check=False)
 
 
 BACKENDS = {"herdr": Herdr, "orca": Orca}
@@ -229,15 +255,14 @@ def detect_backend():
     die("missing: herdr or orca")
 
 
-def load_config():
-    return tomllib.loads((BLUEPRINT / "team.toml").read_text())
+def role_settings(f):
+    """TOML frontmatter between +++ lines at the top of a role file, or {}."""
+    m = re.match(r"\+\+\+\n(.*?)\n\+\+\+\n", f.read_text(), re.S)
+    return tomllib.loads(m.group(1)) if m else {}
 
 
-def check_deps(cfg, backend):
+def check_tools(backend):
     missing = [t for t in (backend, "git", "node") if not shutil.which(t)]
-    for role in cfg["roles"].values():
-        if not shutil.which(role["kind"]) and role["kind"] not in missing:
-            missing.append(role["kind"])
     missing += [v for v in HEARTH_ENV if not os.environ.get(v)]
     files = ("runner/index.ts", "mcp/index.ts") if backend == "herdr" else ("mcp/index.ts",)
     for f in files:
@@ -245,9 +270,21 @@ def check_deps(cfg, backend):
             missing.append(f"{HEARTH_DIR}/{f} (set HEARTH_DIR)")
     if missing:
         die("missing: " + ", ".join(missing))
-    kind = cfg["roles"][cfg["director"]]["kind"]
-    if kind != "claude":
-        die(f"director kind must be claude, got {kind}. Codex drops its current turn when a worker reports.")
+
+
+def load_project(dt):
+    """The project's team settings and role settings. The blueprint is not read after scaffolding."""
+    cfg = tomllib.loads((dt / "team.toml").read_text())
+    roles = {f.stem: role_settings(f) for f in sorted((dt / "roles").glob("*.md"))}
+    director = roles.get(cfg["director"])
+    if director is None:
+        die(f"no director role at {dt}/roles/{cfg['director']}.md")
+    if director.get("kind") != "claude":
+        die(f"director kind must be claude, got {director.get('kind')}. Codex drops its current turn when a worker reports.")
+    missing = sorted({r["kind"] for r in roles.values() if r.get("kind") and not shutil.which(r["kind"])})
+    if missing:
+        die("missing agent CLIs: " + ", ".join(missing))
+    return cfg, roles
 
 
 def slug(repo):
@@ -262,19 +299,6 @@ def agent_args(role):
     if role.get("model"):
         args += ["--model" if role["kind"] == "claude" else "-m", role["model"]]
     return args + role.get("args", [])
-
-
-def role_config(cfg, repo, role):
-    """The catalog role from team.toml, overridden by TOML frontmatter in .devteam/roles/<role>.md."""
-    conf = dict(cfg["roles"].get(role, {}))
-    f = repo / ".devteam/roles" / f"{role}.md"
-    if f.is_file():
-        m = re.match(r"\+\+\+\n(.*?)\n\+\+\+\n", f.read_text(), re.S)
-        if m:
-            conf.update(tomllib.loads(m.group(1)))
-    if "kind" not in conf:
-        die(f"role {role} has no kind. Add it to team.toml or the project role's frontmatter.")
-    return conf
 
 
 def repo_root(path, new):
@@ -320,9 +344,8 @@ def agent(session, name):
 
 
 def cmd_up(path, new, backend_name):
-    cfg = load_config()
     backend_name = backend_name or detect_backend()
-    check_deps(cfg, backend_name)
+    check_tools(backend_name)
     repo = repo_root(path, new)
     prefix = slug(repo) + "-"
     name = prefix + "director"
@@ -339,6 +362,14 @@ def cmd_up(path, new, backend_name):
         f.parent.mkdir(parents=True, exist_ok=True)
         if not f.exists():
             f.write_text(text)
+    # The project gets its own copy of the settings and roles, so nothing points back at the blueprint.
+    if not (dt / "team.toml").exists():
+        shutil.copy(BLUEPRINT / "team.toml", dt / "team.toml")
+    (dt / "roles").mkdir(exist_ok=True)
+    for f in (BLUEPRINT / "roles").glob("*.md"):
+        if not (dt / "roles" / f.name).exists():
+            shutil.copy(f, dt / "roles" / f.name)
+    cfg, roles = load_project(dt)
 
     b = BACKENDS[backend_name]()
     env = [a for v in ("HEARTH_URL", "HEARTH_TOKEN") for a in ("--env", f"{v}={os.environ[v]}")]
@@ -346,10 +377,10 @@ def cmd_up(path, new, backend_name):
     session.update(backend=b.name, director=name, agents={})
     hearth = {v: os.environ[v] for v in ("HEARTH_URL", "HEARTH_TOKEN")}
     mcp = json.dumps({"mcpServers": {"hearth": {"command": "node", "args": [str(HEARTH_DIR / "mcp/index.ts")], "env": hearth}}})
-    role = cfg["roles"][cfg["director"]]
+    role = roles[cfg["director"]]
     ref = b.start(name, role["kind"], [*agent_args(role), "--mcp-config", mcp], pane, repo)
-    session["agents"][name] = {"role": cfg["director"], "kind": role["kind"], "ref": ref, "pane": pane, "worktree": None,
-                               "task": None}
+    session["agents"][name] = {"role": cfg["director"], "kind": role["kind"], "exit": role.get("exit"), "ref": ref,
+                               "pane": pane, "worktree": None, "task": None}
     save_session(repo, session)
     if not b.wait(ref, START_MS):
         print(f"The director is waiting on a startup dialog. Answer it in its {b.name} terminal. Waiting up to 5 minutes.")
@@ -362,19 +393,28 @@ def cmd_up(path, new, backend_name):
                       "RUNNER_TRIGGER=owner", "--no-focus")
         session["runner_pane"] = runner["pane"]["pane_id"]
         call("herdr", "pane", "run", session["runner_pane"], "node runner/index.ts")
-        save_session(repo, session)
+    beat = shlex.join([str(Path(__file__).resolve()), "heartbeat", "--minutes", str(cfg.get("heartbeat_minutes", 10))])
+    session["heartbeat"] = b.run_beside(session, repo, beat, env, prefix + "heartbeat")
+    save_session(repo, session)
 
-    b.prompt(ref, "\n".join([
+    kickoff = "\n".join([
         "You are the director of the dev team for this project.",
-        f"Read your role file and follow it: {BLUEPRINT}/roles/director.md",
-        f"Blueprint: {BLUEPRINT} (team settings in team.toml, base roles in roles/)",
-        f"Devteam CLI: {BLUEPRINT}/bin/devteam",
+        f"Read your role file and follow it: {dt}/roles/{cfg['director']}.md",
+        f"Team settings: {dt}/team.toml. Roles: {dt}/roles/",
+        f"Devteam CLI: {Path(__file__).resolve()}",
         f"Project: {repo} ({'new project' if new else 'existing repo'})",
         f"Your agent name: {name}. Worker name prefix: {prefix}",
         f"The human on hearth: @{os.environ['HEARTH_HUMAN']}",
         "Start now.",
-    ]))
-    print(f"director {name} started in {b.name}")
+    ])
+    # A prompt sent right after a startup dialog closes can be dropped, so resend until the director starts on it.
+    for _ in range(3):
+        if b.prompt_started(ref, kickoff):
+            break
+        time.sleep(3)
+    else:
+        die(f"the director never picked up its kickoff. Check its {b.name} terminal, then run devteam down and up.")
+    print(f"director {name} started in {b.name}, heartbeat every {cfg.get('heartbeat_minutes', 10)} minutes")
     if b.name == "herdr":
         print(f"hearth runner in {session['runner_pane']}")
     else:
@@ -384,8 +424,8 @@ def cmd_up(path, new, backend_name):
 def remove_agent(repo, session, b, name, force):
     """Exit an agent, close its pane and remove its worktree. Return an error message or None."""
     a = session["agents"][name]
-    if b.status(a["ref"]) not in ("gone", "exited") and a["kind"] in EXIT:
-        b.prompt(a["ref"], EXIT[a["kind"]])
+    if b.status(a["ref"]) not in ("gone", "exited") and a.get("exit"):
+        b.prompt(a["ref"], a["exit"])
         b.wait(a["ref"], 5000)
     b.close(a)
     err = b.remove_worktree(repo, a["worktree"], force) if a["worktree"] else None
@@ -449,16 +489,33 @@ def cmd_hire(name, role_name, task):
         die(f"name {name} must match {NAME.pattern}")
     if name in session["agents"]:
         die(f"{name} already exists")
-    role = role_config(load_config(), repo, role_name)
+    roles = load_project(repo / ".devteam")[1]
+    if role_name not in roles:
+        die(f"no role {role_name} in {repo}/.devteam/roles/")
+    role = roles[role_name]
     if role.get("worktree") and not task:
         die(f"role {role_name} works in a worktree. Pass --task <id>.")
     pane, wt = b.place(repo, session, f"devteam/{task}" if role.get("worktree") else None)
     ref = b.start(name, role["kind"], agent_args(role), pane, wt or repo)
-    session["agents"][name] = {"role": role_name, "kind": role["kind"], "ref": ref, "pane": pane, "worktree": wt,
-                               "task": task}
+    session["agents"][name] = {"role": role_name, "kind": role["kind"], "exit": role.get("exit"), "ref": ref, "pane": pane,
+                               "worktree": wt, "task": task}
     save_session(repo, session)
     b.wait(ref, START_MS)
     print(f"{name} hired. Status: {b.status(ref)}. Worktree: {wt or 'none'}")
+
+
+def cmd_heartbeat(minutes):
+    """Wake an idle director every few minutes while it has workers, so it notices stalled workers."""
+    repo = repo_root(None, False)
+    while True:
+        time.sleep(minutes * 60)
+        if not (repo / ".devteam/session.json").exists():
+            return
+        session, b = load_session(repo)
+        workers = [n for n in session["agents"] if n != session["director"]]
+        if workers and b.status(session["agents"][session["director"]]["ref"]) in ("idle", "done"):
+            b.prompt(session["agents"][session["director"]]["ref"], "heartbeat: check every worker for stalls")
+            print(time.strftime("%H:%M"), f"woke {session['director']}, {len(workers)} workers", flush=True)
 
 
 def cmd_list():
@@ -494,6 +551,8 @@ def main():
     rd.add_argument("name")
     rd.add_argument("--lines", type=int, default=120)
     sub.add_parser("list")
+    hb = sub.add_parser("heartbeat", help=argparse.SUPPRESS)
+    hb.add_argument("--minutes", type=float, default=10)
     fire = sub.add_parser("fire")
     fire.add_argument("name")
     fire.add_argument("--force", action="store_true", help="remove the worktree even with uncommitted changes")
@@ -508,6 +567,8 @@ def main():
         cmd_hire(a.name, a.role, a.task)
     elif a.cmd == "list":
         cmd_list()
+    elif a.cmd == "heartbeat":
+        cmd_heartbeat(a.minutes)
     else:
         repo = repo_root(None, False)
         session, b = load_session(repo)
