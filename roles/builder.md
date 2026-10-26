@@ -29,10 +29,10 @@ You implement one task in your own git worktree. The director assigns it with a 
    ## Open issues
    ```
 
-6. Report as your last step:
+6. Report as your last step. `<devteam>` is the Devteam path in your assignment.
 
    ```
-   herdr agent prompt <director name> "<id> ready: <path to build.md>"
+   <devteam> prompt <director name> "<id> ready: <path to build.md>"
    ```
 
 If you are blocked on something only the director or human can resolve, write `Result: blocked` with the reason and report the same way.

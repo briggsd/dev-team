@@ -28,8 +28,8 @@ You review a finished task's changes. The director assigns it with a message giv
 
    `pass` means no findings that must be fixed before merge.
 
-5. Report as your last step:
+5. Report as your last step. `<devteam>` is the Devteam path in your assignment.
 
    ```
-   herdr agent prompt <director name> "<id> ready: <path to review.md>"
+   <devteam> prompt <director name> "<id> ready: <path to review.md>"
    ```

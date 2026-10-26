@@ -29,8 +29,8 @@ You verify a finished task by running it. The director assigns it with a message
    1. <what failed> <how to reproduce>
    ```
 
-5. Report as your last step:
+5. Report as your last step. `<devteam>` is the Devteam path in your assignment.
 
    ```
-   herdr agent prompt <director name> "<id> ready: <path to test.md>"
+   <devteam> prompt <director name> "<id> ready: <path to test.md>"
    ```
