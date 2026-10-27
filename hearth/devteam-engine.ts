@@ -54,8 +54,8 @@ export function devteam(o: { agent: string; url: string; Busy: typeof BusyClass;
   const ready = (s: string) => s === "idle" || s === "done";
   // A successful `devteam prompt` doesn't prove the turn started: it can press Enter on a prompt left in the input box
   // and exit 0. So idle or done counts as the end of the turn only once the turn was seen to start: a working or
-  // blocked status, or the reply file, which a turn that ends between two polls leaves behind. "unstarted" means no
-  // start was seen within the start window.
+  // blocked status, or the reply file, which a turn that ends between two polls leaves behind. Any other status proves
+  // nothing. "unstarted" means no start was seen within the start window.
   const prompt = async (text: string, signal: AbortSignal, reply?: string) => {
     await run(["prompt", agent, text], signal);
     const startBy = Date.now() + startWindow;
@@ -64,7 +64,7 @@ export function devteam(o: { agent: string; url: string; Busy: typeof BusyClass;
     for (;;) {
       await sleep(poll, undefined, { signal });
       const s = await status(signal);
-      started ||= !ready(s) || (reply !== undefined && existsSync(reply));
+      started ||= s === "working" || s === "blocked" || (reply !== undefined && existsSync(reply));
       if (started && (ready(s) || s === "blocked")) return s;
       if (!started && Date.now() >= startBy) return "unstarted";
       if (Date.now() >= end) throw new Error(`@${agent} was still ${s} after the run timeout`);

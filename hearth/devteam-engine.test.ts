@@ -146,6 +146,13 @@ test("devteam engine: an agent still idle for a few polls after the prompt is wa
   assert.equal(existsSync(f.prompts()[0].text.split(" ")[1]), false, "the task file is removed after the run");
 });
 
+test("devteam engine: a status other than working or blocked is not a start, so the idle after it is not the end of the turn", async () => {
+  const f = fake({ statuses: ["idle"], reply: "late", after: ["unknown", "idle", "working +reply", "working", "idle"] });
+  assert.equal(await make().engine("hi", dm()), "late");
+  assert.equal(readFileSync(join(process.env.PATH!.split(":")[0], "statuses"), "utf8"), "idle");
+  assert.equal(existsSync(f.prompts()[0].text.split(" ")[1]), false, "the task file is removed after the run");
+});
+
 test("devteam engine: a turn that ends between two polls is done once its reply file exists", async () => {
   const f = fake({ statuses: ["idle"], reply: "fast", after: ["idle"] });
   assert.equal(await make().engine("hi", dm()), "fast");
