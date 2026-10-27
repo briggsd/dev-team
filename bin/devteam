@@ -334,6 +334,13 @@ def load_session(repo):
     if not sf.exists():
         die(f"no team is running for {repo}")
     session = json.loads(sf.read_text())
+    if "backend" not in session:
+        # Written by the herdr-only devteam, which recorded only the director and its panes.
+        session = {"backend": "herdr", "workspace": session["workspace"], "runner_pane": session.get("runner_pane"),
+                   "heartbeat": session.get("heartbeat_pane"), "director": session["director"],
+                   "agents": {session["director"]: {"role": "director", "kind": "claude", "exit": "/exit",
+                                                    "ref": session["director"], "pane": session["director_pane"],
+                                                    "worktree": None, "task": None}}}
     return session, BACKENDS[session["backend"]]()
 
 
