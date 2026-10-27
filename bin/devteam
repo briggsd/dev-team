@@ -240,7 +240,14 @@ class Orca:
 
     def remove_worktree(self, repo, path, force):
         r = call("orca", "worktree", "rm", "--worktree", f"path:{path}", *(["--force"] if force else []), check=False)
-        return r["error"]["message"] if "error" in r else None
+        if "error" in r:
+            return r["error"]["message"]
+        # Orca finishes removing the worktree after it replies. Git refuses to delete its branch until then.
+        end = time.monotonic() + 30
+        while f"worktree {path}\n" in run("git", "worktree", "list", "--porcelain", cwd=repo).stdout + "\n":
+            if time.monotonic() > end:
+                return "Orca did not finish removing it within 30 seconds"
+            time.sleep(1)
 
     def shut(self, session):
         if session.get("heartbeat"):
@@ -580,8 +587,10 @@ def cmd_clean(task, force):
             die(f"{path}: {err}")
     if session.get("kept", {}).pop(task, None):
         save_session(repo, session)
-    if not run("git", "rev-parse", "--verify", "-q", f"refs/heads/devteam/{task}", cwd=repo, check=False).returncode:
-        run("git", "branch", "-q", "-d", f"devteam/{task}", cwd=repo)
+    # Orca deletes a merged branch with its worktree, so the branch may already be gone.
+    p = run("git", "branch", "-q", "-d", f"devteam/{task}", cwd=repo, check=False)
+    if p.returncode and not run("git", "rev-parse", "--verify", "-q", f"refs/heads/devteam/{task}", cwd=repo, check=False).returncode:
+        die(f"git branch -d devteam/{task} failed: {(p.stderr or p.stdout).strip()}")
     print(f"devteam/{task} cleaned")
 
 
