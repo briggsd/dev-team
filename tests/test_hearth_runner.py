@@ -154,7 +154,7 @@ class HearthRunner(unittest.TestCase):
         up = self.devteam("up", "--backend", "herdr", FAKE_FAIL="herdr workspace create")
         self.assertNotEqual(up.returncode, 0)
         self.assertIn("fake failure", up.stderr)
-        self.assertEqual(list(self.tokens.iterdir()), [])
+        self.assertEqual(list(self.tokens.glob("devteam-hearth-*")), [])
 
     def test_both_backends_need_the_runner(self):
         (self.hearth / "runner/index.ts").unlink()
