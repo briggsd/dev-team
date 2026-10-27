@@ -14,7 +14,7 @@ Start a team of coding agents on any project with one command. A director agent 
 - python3 3.11 or later (runs `bin/devteam`)
 - node, with hearth only (runs the hearth MCP server and runner)
 - The agent CLIs named in the role catalog (default: `claude`, `codex`)
-- hearth, optional: an agent account for the director, its MCP server, and its runner. Setting any `HEARTH_` variable turns it on, and then all of these are required. Without hearth, the director talks to the human in its own terminal. Env: `HEARTH_URL`, `HEARTH_TOKEN`, `HEARTH_HUMAN` (the human's hearth username), `HEARTH_DIR` (default `~/workspace/hearth`)
+- hearth, optional: an agent account for the director, its MCP server, and its runner. Setting any `HEARTH_` variable turns it on, and then all of these are required. Without hearth, the director talks to the human in its own terminal. Env: `HEARTH_URL`, `HEARTH_TOKEN`, `HEARTH_HUMAN` (the human's hearth username), `HEARTH_DIR` (default `~/workspace/hearth`). Optional: `HEARTH_ALERTS`, the id of a hearth channel whose webhook posts the runner hands to the director as alerts
 
 No other tools. `devteam up` checks each dependency and exits with the name of anything missing.
 
@@ -88,7 +88,7 @@ Agent names are unique per herdr server, so every agent is named `<project-slug>
 | Status | `herdr agent get` | `orca terminal wait --for tui-idle --timeout-ms 3000`: satisfied is idle, `blockedReason` is blocked, timeout is working |
 | Read | `herdr agent read --source recent-unwrapped` | `orca terminal read` |
 | Remove worktree | `herdr worktree remove --workspace <id>`, which also closes the agent's pane | `orca worktree rm`. Orca deletes the branch only when it can prove it is merged |
-| Hearth runner | started in a pane | not started, see R3 |
+| Hearth runner | pane below the director | its own terminal in the repo's worktree |
 | Heartbeat | pane below the runner | its own terminal in the repo's worktree |
 
 ### `devteam up [path] [--new]`
@@ -98,8 +98,8 @@ Agent names are unique per herdr server, so every agent is named `<project-slug>
 3. Create missing `.devteam/` files, and copy missing `team.toml` and role files from the blueprint. Never modify files outside `.devteam/` in an existing repo.
 4. Check every agent CLI named in the project's roles, and that the director role is `kind = "claude"`.
 5. Create the director's place (see Backends).
-6. Start the director, with the hearth MCP server configured from `HEARTH_URL` and `HEARTH_TOKEN` when hearth is on. If a startup dialog appears, wait up to 5 minutes for the human to answer it.
-7. herdr with hearth only: start the hearth runner in a pane: `RUNNER_HERDR_AGENT=<slug>-director RUNNER_TRIGGER=owner node <hearth>/runner/index.ts`.
+6. Start the director, with the hearth MCP server configured from `HEARTH_URL` and `HEARTH_TOKEN_FILE` when hearth is on. devteam writes `HEARTH_TOKEN` to a mode 600 file in a new mode 700 temp directory, so the token is never on a command line, in a terminal title or in `session.json`. `down` removes the directory. If a startup dialog appears, wait up to 5 minutes for the human to answer it.
+7. With hearth only: start the hearth runner beside the director (see Backends), in the project, with the devteam engine from `hearth/devteam-engine.ts`: `env PATH=<dev-team>/bin:$PATH HEARTH_URL=... HEARTH_TOKEN_FILE=<token file> RUNNER_EXTENSIONS=<dev-team>/hearth/devteam-engine.ts RUNNER_ENGINE=devteam RUNNER_TRIGGER=owner DEVTEAM_AGENT=<slug>-director DEVTEAM_PROJECT=<repo> [RUNNER_ALERTS=$HEARTH_ALERTS] node <hearth>/runner/index.ts`. Its pane or terminal handle is saved as `runner` in `session.json`, and `down` closes it.
 8. Start the heartbeat.
 9. Send the kickoff: the project's director role path, team settings, the devteam CLI path, project path, agent name, worker prefix, and the human's hearth username or `No hearth`. Resend up to 3 times if the director does not start working on it. The first prompt after a startup dialog closes can be dropped.
 
@@ -150,7 +150,7 @@ The director wakes only on events: a worker report or a hearth message. If every
 - **R2.** Tested 2026-10-24 (herdr 0.9.3, Claude Code 2.1.310, codex). A `herdr agent prompt` sent to a working agent is accepted by both. Claude finished its current turn, then answered the new message. Codex dropped its current turn at once and answered the new message instead. So the director must run on claude, and `devteam up` rejects any other kind for the director role. The director prompts workers only when they are idle, so the codex reviewer is not affected.
   Retested 2026-10-26 for claude in Orca 1.4.240 with `orca terminal send`. The running command was not interrupted. Claude took the queued message into the same turn and answered it. Codex was not retested in Orca.
 
-- **R3.** The hearth runner supports only herdr. Under Orca, `devteam up` starts no runner, so a hearth DM does not wake an idle director. The director still reads the DM whenever a worker report or heartbeat wakes it. Criterion 8's wake step fails under Orca until the runner gets an Orca engine.
+- **R3.** `devteam up` starts the hearth runner with the devteam engine on both backends (t068). The engine reaches the director only through `devteam prompt` and `devteam list`. Criterion 8's wake step under Orca is tested only against a fake `orca` until a live run confirms it.
 
 - **R4.** Orca terminal handles change when Orca restarts. After a restart, `devteam` cannot reach the team's agents. Run `devteam down` and `devteam up` again.
 
@@ -171,5 +171,5 @@ The director wakes only on events: a worker report or a hearth message. If every
 11. Missing the chosen backend (`herdr` or `orca`), `git`, a cataloged agent CLI, or, when any `HEARTH_` variable is set, any other `HEARTH_` variable makes `devteam up` exit non-zero, naming the missing tool.
 12. After `up`, no file in `.devteam/` references the blueprint path, and the kickoff names only project files and the devteam CLI.
 13. A task is announced only after main passes the definition of done.
-14. Criteria 1 to 7 and 9 to 13 pass on both backends. On Orca, criterion 8 passes except the wake step (R3).
+14. Criteria 1 to 7 and 9 to 13 pass on both backends. On Orca, criterion 8's wake step is not yet confirmed live (R3).
 15. With no `HEARTH_` variables set, `devteam up` starts the director without hearth, and the director asks for the vision in its terminal.

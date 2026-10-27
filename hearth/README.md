@@ -4,7 +4,9 @@
 
 ## Start the runner
 
-Run it from the project the team belongs to, with `devteam` on PATH and the director's hearth agent token in a mode 600 file:
+With hearth on (`HEARTH_URL`, `HEARTH_TOKEN` and `HEARTH_HUMAN` set), `devteam up` starts the runner beside the director on herdr and Orca, with `DEVTEAM_AGENT` set to the director, and `devteam down` closes it. devteam writes the token to a mode 600 file in a new mode 700 directory and passes its path as `HEARTH_TOKEN_FILE`. To hand the director alerts, also set `HEARTH_ALERTS=<alerts channel id>` before `devteam up`. It becomes `RUNNER_ALERTS`. Without it the runner starts without alerts.
+
+To start it by hand, run it from the project the team belongs to, with `devteam` on PATH and the director's hearth agent token in a mode 600 file:
 
 ```sh
 PATH=<dev-team>/bin:$PATH \
@@ -31,3 +33,5 @@ HEARTH_DIR=<hearth checkout with node_modules> node --test hearth/*.test.ts
 ```
 
 `HEARTH_DIR` defaults to `~/workspace/hearth`. The test runs the extension against a fake `devteam` on PATH.
+
+`python3 -m unittest discover -s tests` checks that `devteam up` starts the runner and `devteam down` closes it, against fake `herdr` and `orca` commands that record their arguments.
