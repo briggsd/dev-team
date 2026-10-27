@@ -18,7 +18,7 @@ For example `DEVTEAM_AGENT=hearth-director`. Leave out `RUNNER_ALERTS` if the di
 
 ## What it does
 
-- **A run** (a DM from the owner, or a message in a watched channel): writes the conversation to a mode 600 task file, prompts the agent `Read <task> and do what it asks.`, polls `devteam list` until the agent is idle or done again, and posts the reply file the task named. No reply file means no reply. A message in a server channel that is not watched is refused.
+- **A run** (a DM from the owner, or a message in a watched channel): writes the conversation to a mode 600 task file, prompts the agent `Read <task> and do what it asks.`, polls `devteam list` until the agent's turn has started (a working or blocked status, or the reply file) and it is idle or done again, and posts the reply file the task named. No reply file means no reply. If no start is seen within 60 seconds, the run replies that the message was not delivered and keeps the task file, since the prompt may still run. A message in a server channel that is not watched is refused.
 - **Busy**: while the agent is working, the runner holds the message and asks again every 5 seconds. After 10 minutes it replies that the message was not delivered.
 - **Blocked**: an agent waiting on an approval gets no prompt, and the run says so. If it blocks mid-run without a reply, the run says the reply will be in its terminal.
 - **An alert** (a webhook in the `RUNNER_ALERTS` channel): prompts the agent with fixed text naming only the channel, server and hearth URL, so no webhook text reaches it. It waits for an idle agent the same way, for up to 10 minutes.

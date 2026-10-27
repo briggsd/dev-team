@@ -21,13 +21,15 @@ after(() => {
 // A stand-in `devteam`, put first on PATH. `list` prints two agents, hearth-director with the first line of
 // `statuses` (which it then drops, keeping the last). `prompt` logs the agent, the text and, when the text names a
 // task file, its contents and mode, then writes `reply` to the path the task names and replaces `statuses` with
-// `after`. An unknown agent fails like the real CLI. `herdr` and `orca` beside it log any call, which must not happen.
+// `after`. A status written `<status> +reply` is served as <status> and writes `reply` then instead, for a turn that
+// starts late. An unknown agent fails like the real CLI. `herdr` and `orca` beside it log any call, which must not happen.
 function fake(o: { statuses: string[]; reply?: string; after?: string[] }) {
   const dir = mkdtempSync(join(tmpdir(), "fake-devteam-"));
   dirs.push(dir);
   const statuses = join(dir, "statuses");
   const prompts = join(dir, "prompts");
   const forbidden = join(dir, "forbidden");
+  const replyPath = join(dir, "reply-path");
   writeFileSync(statuses, o.statuses.join("\n"));
   writeFileSync(join(dir, "devteam"), `#!${process.execPath}
 const fs = require("node:fs");
@@ -35,6 +37,10 @@ const [cmd, name, text] = process.argv.slice(2);
 if (cmd === "list") {
   const s = fs.readFileSync(${JSON.stringify(statuses)}, "utf8").split("\\n");
   if (s.length > 1) fs.writeFileSync(${JSON.stringify(statuses)}, s.slice(1).join("\\n"));
+  if (s[0].endsWith(" +reply")) {
+    s[0] = s[0].slice(0, -" +reply".length);
+    fs.writeFileSync(fs.readFileSync(${JSON.stringify(replyPath)}, "utf8"), ${JSON.stringify(o.reply ?? "")});
+  }
   process.stdout.write("hearth-director\\trole=director\\ttask=-\\tstatus=" + s[0] + "\\tworktree=-\\nbuilder-1\\trole=builder\\ttask=t1\\tstatus=idle\\tworktree=/w\\n");
   process.exit(0);
 }
@@ -46,7 +52,8 @@ if (task) {
   entry.task = fs.readFileSync(task, "utf8");
   entry.mode = fs.statSync(task).mode & 0o777;
   const reply = / to (\\S+)\\. If no reply/.exec(entry.task)[1];
-  ${o.reply === undefined ? "" : `fs.writeFileSync(reply, ${JSON.stringify(o.reply)});`}
+  fs.writeFileSync(${JSON.stringify(replyPath)}, reply);
+  ${o.reply === undefined || o.statuses.concat(o.after ?? []).some(x => x.endsWith(" +reply")) ? "" : `fs.writeFileSync(reply, ${JSON.stringify(o.reply)});`}
 }
 fs.appendFileSync(${JSON.stringify(prompts)}, JSON.stringify(entry) + "\\n");
 ${o.after ? `fs.writeFileSync(${JSON.stringify(statuses)}, ${JSON.stringify(o.after.join("\n"))});` : ""}
@@ -60,7 +67,7 @@ ${o.after ? `fs.writeFileSync(${JSON.stringify(statuses)}, ${JSON.stringify(o.af
   };
 }
 
-const make = (o: { timeoutMs?: number } = {}) => devteam({ agent: "hearth-director", url: "http://hearth.test/", Busy, timeoutMs: o.timeoutMs ?? 5000, pollMs: 10 });
+const make = (o: { timeoutMs?: number; startMs?: number } = {}) => devteam({ agent: "hearth-director", url: "http://hearth.test/", Busy, timeoutMs: o.timeoutMs ?? 5000, pollMs: 10, startMs: o.startMs ?? 1000 });
 const dm = (canWrite = true) => ({ serverId: null, channelId: "c1", canWrite, watched: false, signal: new AbortController().signal });
 const alertAt = () => ({ serverId: "s1", channelId: "c9", name: "alerts", signal: new AbortController().signal });
 
@@ -132,6 +139,30 @@ test("devteam engine: a message held past the run timeout is not delivered and s
   assert.equal(f.prompts().length, 0);
 });
 
+test("devteam engine: an agent still idle for a few polls after the prompt is waited for until its turn starts and ends", async () => {
+  const f = fake({ statuses: ["idle"], reply: "late", after: ["idle", "idle", "idle", "working +reply", "working", "idle"] });
+  assert.equal(await make().engine("hi", dm()), "late");
+  assert.equal(readFileSync(join(process.env.PATH!.split(":")[0], "statuses"), "utf8"), "idle");
+  assert.equal(existsSync(f.prompts()[0].text.split(" ")[1]), false, "the task file is removed after the run");
+});
+
+test("devteam engine: a turn that ends between two polls is done once its reply file exists", async () => {
+  const f = fake({ statuses: ["idle"], reply: "fast", after: ["idle"] });
+  assert.equal(await make().engine("hi", dm()), "fast");
+  assert.equal(f.prompts().length, 1);
+});
+
+test("devteam engine: a turn that never starts is not delivered, and its task file stays for the prompt that names it", async () => {
+  const f = fake({ statuses: ["idle"], after: ["idle"] });
+  const { engine } = make({ startMs: 50 });
+  assert.equal(await engine("hi", dm()), "@hearth-director didn't start on your message, so it was not delivered. Send it again in a bit.");
+  const task = f.prompts()[0].text.split(" ")[1];
+  assert.equal(existsSync(task), true);
+  // the next run's cleanup keeps it too
+  assert.match(await engine("again", dm()), /not delivered/);
+  assert.equal(existsSync(task), true);
+});
+
 test("devteam engine: an agent still working at the run timeout fails the run", async () => {
   fake({ statuses: ["idle"], after: ["working"] });
   await assert.rejects(make({ timeoutMs: 50 }).engine("hi", dm()), /@hearth-director was still working after the run timeout/);
@@ -156,6 +187,14 @@ test("devteam alert: prompts the agent with fixed text naming only the channel, 
   }]);
   assert.equal(readFileSync(join(process.env.PATH!.split(":")[0], "statuses"), "utf8"), "idle");
   assert.equal(f.forbidden(), false);
+});
+
+test("devteam alert: an alerts prompt that never starts fails the alert, and one that starts late is waited for", async () => {
+  fake({ statuses: ["idle"], after: ["idle"] });
+  await assert.rejects(make({ startMs: 50 }).alert(alertAt()), /@hearth-director didn't start on the alerts prompt, so the alerts were not handed over/);
+  fake({ statuses: ["idle"], after: ["idle", "idle", "working", "idle"] });
+  await make().alert(alertAt());
+  assert.equal(readFileSync(join(process.env.PATH!.split(":")[0], "statuses"), "utf8"), "idle");
 });
 
 test("devteam alert: a working or blocked agent is not prompted and the runner holds the alerts with Busy, up to the run timeout", async () => {
