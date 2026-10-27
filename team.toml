@@ -3,6 +3,7 @@
 max_agents = 4               # workers running at once, director excluded
 heartbeat_minutes = 10       # how often the director is woken while it has workers
 director = "director"        # role file in .devteam/roles/ used for the director, must be kind = "claude"
+# setup = "pnpm install"     # shell command run in each new worktree before its agent starts
 
 # Role settings live in TOML frontmatter (between +++ lines) at the top of each role file:
 #   kind      agent CLI: claude or codex

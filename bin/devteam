@@ -7,12 +7,15 @@
 
 Agent commands, run from the project or any of its worktrees:
 
-  devteam hire <name> <role> [--task ID]   start a worker, in a worktree on devteam/<ID> when the role uses one
-  devteam prompt <name> <text>             submit a prompt to an agent without waiting
+  devteam hire <name> <role> [--task ID]   start a worker, in a worktree on devteam/<ID> when the role uses one,
+                                           or detached at that branch's head when another worktree has it
+  devteam prompt <name> <text>             submit a prompt to an agent without waiting for its turn
   devteam key <name> <key>...              press keys in an agent's terminal: enter, up, down, esc
   devteam read <name> [--lines N]          print an agent's recent terminal output
   devteam list                             print each agent's role, task, status and worktree
-  devteam fire <name> [--force]            exit an agent, close its pane, remove its worktree
+  devteam fire <name> [--force] [--keep-worktree]
+                                           exit an agent, close its pane, remove its worktree unless kept
+  devteam clean <ID> [--force]             remove the kept worktree and the merged branch devteam/<ID>
 """
 
 import argparse
@@ -83,10 +86,11 @@ class Herdr:
         ws = call("herdr", "workspace", "create", "--cwd", str(repo), "--label", label, *env, "--no-focus")
         return {"workspace": ws["workspace"]["workspace_id"]}, ws["root_pane"]["pane_id"]
 
-    def place(self, repo, session, branch):
-        """Return (pane, worktree path) for a new agent, in a new worktree on branch when one is given."""
+    def place(self, repo, session, branch, base=None):
+        """Return (pane, worktree path) for a new agent, in a new worktree on branch when one is given, from base if given."""
         if branch:
-            wt = call("herdr", "worktree", "create", "--cwd", str(repo), "--branch", branch, "--label", branch, "--no-focus")
+            wt = call("herdr", "worktree", "create", "--cwd", str(repo), "--branch", branch, *(["--base", base] if base else []),
+                      "--label", branch, "--no-focus")
             return wt["root_pane"]["pane_id"], wt["workspace"]["worktree"]["checkout_path"]
         p = call("herdr", "pane", "split", "--pane", session["agents"][session["director"]]["pane"],
                  "--direction", "down", "--cwd", str(repo), "--no-focus")
@@ -111,7 +115,8 @@ class Herdr:
 
     def prompt_started(self, ref, text):
         """Submit a prompt and report whether the agent started on it."""
-        r = call("herdr", "agent", "prompt", ref, text, "--wait", "--timeout", "15000", check=False)
+        r = call("herdr", "agent", "prompt", ref, text, "--wait", *[a for s in ("working", "blocked", "idle", "done")
+                                                                    for a in ("--until", s)], "--timeout", "15000", check=False)
         return r.get("error", {}).get("code") != "agent_prompt_stalled"
 
     def run_beside(self, session, cwd, command, env, title):
@@ -166,10 +171,11 @@ class Orca:
             call("orca", "repo", "add", "--path", str(repo))
         return {}, None
 
-    def place(self, repo, session, branch):
+    def place(self, repo, session, branch, base=None):
         if not branch:
             return None, None
-        wt = call("orca", "worktree", "create", "--repo", f"path:{repo}", "--name", branch, "--setup", "skip")["worktree"]
+        wt = call("orca", "worktree", "create", "--repo", f"path:{repo}", "--name", branch, *(["--base-branch", base] if base else []),
+                  "--setup", "skip")["worktree"]
         # Orca names the branch after the worktree with a user prefix. Workers and merges expect devteam/<task-id>.
         run("git", "-C", wt["path"], "branch", "-m", branch)
         return None, wt["path"]
@@ -423,7 +429,8 @@ def cmd_up(path, new, backend_name):
         f"Project: {repo} ({'new project' if new else 'existing repo'})",
         f"Your agent name: {name}. Worker name prefix: {prefix}",
         f"The human on hearth: @{os.environ['HEARTH_HUMAN']}" if hearth else
-        "No hearth: talk to the human in this terminal. They read it and answer by typing to you.",
+        "No hearth from devteam: unless your role file says how to reach the human, talk to them in this terminal."
+        " They read it and answer by typing to you.",
         "Start now.",
     ])
     # A prompt sent right after a startup dialog closes can be dropped, so resend until the director starts on it.
@@ -442,16 +449,32 @@ def cmd_up(path, new, backend_name):
         print("no hearth runner: it supports herdr only, so hearth DMs reach the director only when it wakes")
 
 
-def remove_agent(repo, session, b, name, force):
-    """Exit an agent, close its pane and remove its worktree. Return an error message or None."""
+def submit(b, ref, text):
+    """Submit a prompt. A long prompt can sit pasted in the input box, so press Enter once if no turn started."""
+    if not b.prompt_started(ref, text):
+        b.keys(ref, ["enter"])
+
+
+def task_worktrees(repo, task):
+    """Paths of the worktrees on branch devteam/<task>."""
+    p = run("git", "worktree", "list", "--porcelain", cwd=repo)
+    return [wt["worktree"] for block in p.stdout.split("\n\n")
+            if (wt := dict(line.split(" ", 1) for line in block.splitlines() if " " in line)).get("branch") == f"refs/heads/devteam/{task}"]
+
+
+def remove_agent(repo, session, b, name, force, keep=False):
+    """Exit an agent, close its pane and remove its worktree unless kept. Return an error message or None."""
     a = session["agents"][name]
     if b.status(a["ref"]) not in ("gone", "exited") and a.get("exit"):
         b.prompt(a["ref"], a["exit"])
         b.wait(a["ref"], 5000)
+    # herdr closes a worktree agent's pane only with its worktree, so a kept worktree keeps its pane.
     b.close(a)
-    err = b.remove_worktree(repo, a["worktree"], force) if a["worktree"] else None
+    err = b.remove_worktree(repo, a["worktree"], force) if a["worktree"] and not keep else None
     if err:
         return f"{a['worktree']}: {err}"
+    if keep and a["worktree"]:
+        session.setdefault("kept", {})[a["task"]] = {"role": a["role"], "worktree": a["worktree"], "pane": a["pane"]}
     del session["agents"][name]
     save_session(repo, session)
 
@@ -510,19 +533,56 @@ def cmd_hire(name, role_name, task):
         die(f"name {name} must match {NAME.pattern}")
     if name in session["agents"]:
         die(f"{name} already exists")
-    roles = load_project(repo / ".devteam")[1]
+    cfg, roles = load_project(repo / ".devteam")
     if role_name not in roles:
         die(f"no role {role_name} in {repo}/.devteam/roles/")
     role = roles[role_name]
     if role.get("worktree") and not task:
         die(f"role {role_name} works in a worktree. Pass --task <id>.")
-    pane, wt = b.place(repo, session, f"devteam/{task}" if role.get("worktree") else None)
+    branch = base = None
+    kept = session.get("kept", {}).get(task) if role.get("worktree") else None
+    if kept and kept["role"] == role_name:
+        # Rework goes back into the worktree the task's builder kept.
+        pane, wt = session["kept"].pop(task)["pane"], kept["worktree"]
+    else:
+        if role.get("worktree"):
+            branch = f"devteam/{task}"
+            if not run("git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}", cwd=repo, check=False).returncode:
+                # A reviewer of a built task works on the builder's branch. Git allows one worktree per branch, so this
+                # one starts on a throwaway branch at its head and detaches from it.
+                branch, base = f"{branch}-{name}", branch
+        pane, wt = b.place(repo, session, branch, base)
+    if base:
+        run("git", "-C", wt, "checkout", "-q", "--detach")
+        run("git", "-C", wt, "branch", "-q", "-D", branch)
+    if branch and (setup := cfg.get("setup")):
+        p = subprocess.run(setup, shell=True, cwd=wt, capture_output=True, text=True)
+        if p.returncode:
+            b.remove_worktree(repo, wt, True)
+            die(f"setup `{setup}` failed in {wt}, worktree removed:\n{(p.stderr or p.stdout).strip()[-2000:]}")
     ref = b.start(name, role["kind"], agent_args(role), pane, wt or repo)
     session["agents"][name] = {"role": role_name, "kind": role["kind"], "exit": role.get("exit"), "ref": ref, "pane": pane,
                                "worktree": wt, "task": task}
     save_session(repo, session)
     b.wait(ref, START_MS)
-    print(f"{name} hired. Status: {b.status(ref)}. Worktree: {wt or 'none'}")
+    print(f"{name} hired. Status: {b.status(ref)}. Worktree: {wt or 'none'}" + (f", detached at {base}" if base else ""))
+
+
+def cmd_clean(task, force):
+    """Remove the worktree a fired builder kept for its task, and its branch once merged."""
+    repo = repo_root(None, False)
+    session, b = load_session(repo)
+    paths = task_worktrees(repo, task)
+    if users := [n for n, a in session["agents"].items() if a["worktree"] in paths]:
+        die(f"{', '.join(users)} still works in {paths[0]}. Fire it first.")
+    for path in paths:
+        if err := b.remove_worktree(repo, path, force):
+            die(f"{path}: {err}")
+    if session.get("kept", {}).pop(task, None):
+        save_session(repo, session)
+    if not run("git", "rev-parse", "--verify", "-q", f"refs/heads/devteam/{task}", cwd=repo, check=False).returncode:
+        run("git", "branch", "-q", "-d", f"devteam/{task}", cwd=repo)
+    print(f"devteam/{task} cleaned")
 
 
 def cmd_heartbeat(minutes):
@@ -577,6 +637,10 @@ def main():
     fire = sub.add_parser("fire")
     fire.add_argument("name")
     fire.add_argument("--force", action="store_true", help="remove the worktree even with uncommitted changes")
+    fire.add_argument("--keep-worktree", action="store_true", help="keep the worktree and branch, for devteam clean after merge")
+    cl = sub.add_parser("clean")
+    cl.add_argument("task")
+    cl.add_argument("--force", action="store_true", help="remove the worktree even with uncommitted changes")
     a = ap.parse_args()
     if a.cmd == "up":
         cmd_up(a.path, a.new, a.backend)
@@ -590,20 +654,23 @@ def main():
         cmd_list()
     elif a.cmd == "heartbeat":
         cmd_heartbeat(a.minutes)
+    elif a.cmd == "clean":
+        cmd_clean(a.task, a.force)
     else:
         repo = repo_root(None, False)
         session, b = load_session(repo)
         ref = agent(session, a.name)["ref"]
         if a.cmd == "prompt":
-            b.prompt(ref, a.text)
+            submit(b, ref, a.text)
         elif a.cmd == "key":
             b.keys(ref, a.keys)
         elif a.cmd == "read":
             sys.stdout.write(b.read(ref, a.lines))
         elif a.cmd == "fire":
-            if err := remove_agent(repo, session, b, a.name, a.force):
+            wt = agent(session, a.name)["worktree"]
+            if err := remove_agent(repo, session, b, a.name, a.force, a.keep_worktree):
                 die(f"{a.name} stopped but its worktree was not removed: {err}")
-            print(f"{a.name} fired")
+            print(f"{a.name} fired" + (f". Worktree kept: {wt}" if a.keep_worktree and wt else ""))
 
 
 if __name__ == "__main__":

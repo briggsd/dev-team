@@ -119,12 +119,13 @@ The director and workers run these. They find the project from the cwd, includin
 
 | Command | Does |
 |---|---|
-| `devteam hire <name> <role> [--task <id>]` | Starts a worker with the role's settings. A `worktree = true` role gets a worktree on `devteam/<id>`. Prints its status and worktree. |
+| `devteam hire <name> <role> [--task <id>]` | Starts a worker with the role's settings. A `worktree = true` role gets a worktree on `devteam/<id>`, or one detached at its head when another worktree has the branch. Runs `team.toml` `setup` in a new worktree. Prints its status and worktree. |
 | `devteam prompt <name> <text>` | Submits a prompt without waiting. |
 | `devteam key <name> <key>...` | Presses `up`, `down`, `enter` or `esc`, for dialogs and interrupts. |
 | `devteam read <name> [--lines N]` | Prints recent terminal output. |
 | `devteam list` | Prints each agent's role, task, status and worktree. |
-| `devteam fire <name> [--force]` | Sends the role's `exit` command, closes its terminal, removes its worktree. |
+| `devteam fire <name> [--force] [--keep-worktree]` | Sends the role's `exit` command, closes its terminal, removes its worktree unless kept. |
+| `devteam clean <id> [--force]` | Removes the kept worktree on `devteam/<id>` and deletes the branch once merged. |
 
 ### Heartbeat
 

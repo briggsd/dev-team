@@ -94,7 +94,7 @@ A task enters `building` only when every `depends_on` task is `done`, `question`
 ## Hiring a worker
 
 1. Name it `<prefix><role>-<n>`, for example `myapp-builder-1`. Names must match `[a-z][a-z0-9_-]{0,31}`.
-2. Start it: `devteam hire <name> <role> --task <task-id>`. It reads the role's settings, and for `worktree = true` roles creates a worktree on branch `devteam/<task-id>`. It prints the worker's status and worktree path. Builders keep their worktree for one task only.
+2. Start it: `devteam hire <name> <role> --task <task-id>`. It reads the role's settings, and for `worktree = true` roles creates a worktree on branch `devteam/<task-id>`. If another worktree already has that branch, as when a review role with `worktree = true` reviews a build, it creates a worktree detached at the branch head instead. It prints the worker's status and worktree path. Builders keep their worktree for one task only.
 3. If the status is not `idle`, read the screen with `devteam read <name>`. For a trust or hook dialog, choose the option that continues without granting new trust, using `devteam key <name> <key>...` (keys: `up`, `down`, `enter`, `esc`). Anything else you cannot judge becomes a question for the human.
 4. Add a row to `team.md` and update `state.md`.
 
@@ -123,7 +123,7 @@ You wake on a worker report (`<task-id> ready: <path>`), a heartbeat, a hearth m
    - `idle` without a report: ask it for its handoff, or reassign.
    - `working` but its screen has not changed since your last check (note a short fingerprint in `state.md`): treat it as stalled. Interrupt with `devteam key <name> esc` and resend the assignment. If it stalls again, release it, hire a fresh worker, and DM the human.
 4. Advance tasks:
-   - `build.md` done: set `reviewing`, assign every role in `reviews` at once.
+   - `build.md` done: set `reviewing`, assign every role in `reviews` at once. Release the builder with `devteam fire <name> --keep-worktree` so its slot is free while its worktree and branch stay for review, rework and merge. For rework, `devteam hire <name> builder --task <task-id>` puts a new builder back in the kept worktree.
    - All reviews pass: set `testing` and assign the test role, or merge if the test is skipped. Any review fails: set `building` (rework), send all findings to the builder in one message.
    - `test.md` pass: merge. Fail: set `building`, send the failures to the builder.
    - `merged`: check the definition of done. Pass: set `done`, run the retro. Fail: see Merging.
@@ -139,7 +139,7 @@ A review or test passes when it says `Result: pass`. A failure caused only by a 
 
 1. In the main checkout: `git merge --no-ff devteam/<task-id>`.
 2. On conflict, `git merge --abort` and send the task back to `building` with instructions to rebase on the main branch.
-3. Release the task's builder with `devteam fire <builder name>`, which also removes its worktree. Delete the branch with `git branch -d devteam/<task-id>` if it still exists.
+3. Run `devteam clean <task-id>`. It removes the builder's worktree and deletes the merged branch.
 4. Set `merged` and check the definition of done. If it fails, create a fix task at the front of the queue and merge nothing else until main passes again.
 5. Announce a task to the human only when it is `done`.
 
