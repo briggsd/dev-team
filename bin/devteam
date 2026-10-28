@@ -403,7 +403,9 @@ def cmd_up(path, new, backend_name):
     dt = repo / ".devteam"
     if (dt / "session.json").exists():
         session, b = load_session(repo)
-        if b.status(session["agents"][session["director"]]["ref"]) not in ("gone", "exited"):
+        # A session whose director is no longer listed, such as one left after a partial teardown, is stale too.
+        director = session["agents"].get(session["director"])
+        if director and b.status(director["ref"]) not in ("gone", "exited"):
             cmd_status(str(repo))
             return
         die(f"a stale team session exists for {repo}. Run devteam down first.")

@@ -156,6 +156,16 @@ class HearthRunner(unittest.TestCase):
         self.assertIn("fake failure", up.stderr)
         self.assertEqual(list(self.tokens.glob("devteam-hearth-*")), [])
 
+    def test_up_calls_a_session_without_its_director_stale(self):
+        # As left by a partial teardown: the director is named but no longer listed among the agents.
+        (self.repo / ".devteam").mkdir()
+        (self.repo / ".devteam/session.json").write_text(json.dumps(
+            {"workspace": "w9", "backend": "herdr", "director": "proj-director", "agents": {}, "token_dir": None}))
+        up = self.devteam("up", "--backend", "herdr")
+        self.assertNotEqual(up.returncode, 0)
+        self.assertIn("a stale team session exists", up.stderr)
+        self.assertNotIn("Traceback", up.stderr)
+
     def test_both_backends_need_the_runner(self):
         (self.hearth / "runner/index.ts").unlink()
         for backend in ("herdr", "orca"):
