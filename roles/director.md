@@ -61,6 +61,8 @@ role: builder
 owner:
 depends_on: [t001]
 branch: devteam/t003
+criteria_review: reviewer
+rework: 0
 reviews: [reviewer]
 test: tester
 question:
@@ -75,6 +77,8 @@ What and why, tied to the vision.
 
 - `reviews` lists the review roles this task needs. They run in parallel. A UI task might list `[reviewer, designer]` if the project has a designer role.
 - `test` names the test role, or `skip: <reason>`.
+- `criteria_review` names the review role that checks the task file before building, or `skip: <reason>`. Require it for tasks that touch security, state shared by more than one writer, or UI. Skip it for small tasks whose criteria name nothing that could be wrong.
+- `rework` counts rework rounds. Add 1 each time you send the task back to `building` after a failed review or test.
 - Skip a review or the test only when the change cannot affect what it checks, such as a docs-only change, or a tests-only change the builder ran repeatedly. Write the reason in the task and log it.
 
 Keep tasks small enough for one builder session. Make independent tasks file-disjoint where you can, so they merge cleanly.
@@ -89,7 +93,11 @@ any state -> waiting (question: <id>) -> back to prior state when answered
 any state -> dropped
 ```
 
-A task enters `building` only when every `depends_on` task is `done`, `question` is empty, and a worker slot is free.
+A task enters `building` only when every `depends_on` task is `done`, `question` is empty, its criteria review passed or is skipped, and a worker slot is free.
+
+## Criteria review
+
+Wrong or vague acceptance criteria cause more rework rounds than wrong code. Before a task with `criteria_review` set to a role enters `building`, assign that role to review the task file while the task stays `queued`. Use `Worktree: none` and handoff `review-criteria.md`. On `Result: fail`, fix the task file from the findings and assign the review again. The task can be built once the review passes.
 
 ## Hiring a worker
 
@@ -108,7 +116,7 @@ devteam prompt <name> "Role: <project>/.devteam/roles/<role>.md. Task: <project>
 
 1. `devteam prompt` never waits for the worker, so one worker never holds you up.
 2. Before giving a reused worker a new task, send its `reset` command with `devteam prompt <name> "<reset>"`, then the assignment.
-3. Handoff files: `build.md` for builders, `review-<role>.md` for each review, `test.md` for tests. Rework overwrites them. Git keeps the history.
+3. Handoff files: `build.md` for builders, `review-criteria.md` for a criteria review, `review-<role>.md` for each review, `test.md` for tests. Rework overwrites them. Git keeps the history.
 4. Reviewers and testers get the builder's worktree path in `Worktree:`.
 5. Set the task's `status` and `owner`.
 
@@ -124,8 +132,14 @@ You wake on a worker report (`<task-id> ready: <path>`), a heartbeat, a hearth m
    - `working` but its screen has not changed since your last check (note a short fingerprint in `state.md`): treat it as stalled. Interrupt with `devteam key <name> esc` and resend the assignment. If it stalls again, release it, hire a fresh worker, and DM the human.
 4. Advance tasks:
    - `build.md` done: set `reviewing`, assign every role in `reviews` at once. Release the builder with `devteam fire <name> --keep-worktree` so its slot is free while its worktree and branch stay for review, rework and merge. For rework, `devteam hire <name> builder --task <task-id>` puts a new builder back in the kept worktree.
-   - All reviews pass: set `testing` and assign the test role, or merge if the test is skipped. Any review fails: set `building` (rework), send all findings to the builder in one message.
+   - All reviews pass: set `testing` and assign the test role, or merge if the test is skipped. Any review fails: set `building` (rework), send all findings to the builder in one message. Tell the builder to fix every instance of each finding's `Class`, not only the cited lines.
    - `test.md` pass: merge. Fail: set `building`, send the failures to the builder.
+   - Before sending a fourth rework, stop. More fixes the same way rarely converge. Read every review and test handoff for the task, then choose one:
+     - **Rewrite the criteria** when the failures trace to missing, wrong or vague criteria. Run the criteria review again before building.
+     - **Split the task** when the failures fall in separate areas that can be built and reviewed alone.
+     - **Rethink the approach** when the same class keeps coming back. Assign the builder to write `approach.md` in the task directory, with no code changes: why the earlier rounds failed and what it will do differently. Judge it, then send the rework.
+     
+     Log the choice and why. Choose again after every further three reworks.
    - `merged`: check the definition of done. Pass: set `done`, run the retro. Fail: see Merging.
 5. Fill free worker slots from `queued` tasks.
 6. Release workers with no fitting queued task.
@@ -147,9 +161,12 @@ A review or test passes when it says `Result: pass`. A failure caused only by a 
 
 After each task reaches `done` or `dropped`, append to `retro.md`: what slowed the task down or went wrong, and its outcome. Every entry ends with exactly one outcome:
 
-- a line in `context.md` (a check, a convention, a flaky test)
+- an automated check: a command added to Checks in `context.md`, a script in `.devteam/bin/` when it guards only team workflow, or a new task to build a hook, lint rule or test
+- a line in `context.md` (a convention, a flaky test)
 - a change to a role file
 - a new task or issue
+
+Prefer an automated check whenever a script could detect the mistake: a command that must not be run, a file or secret that must not be committed, a step that must happen before a push, a pattern banned in code. Write a Conventions line or a role change only for judgement calls no script can make. When a check replaces an existing Conventions line or role rule, remove that line.
 
 `none` is allowed only the first time a problem appears. The second time the same problem appears, choose one of the three.
 

@@ -23,7 +23,7 @@ You implement one task in your own git worktree. The director assigns it with a 
 ## Steps
 
 1. Read the task file and its acceptance criteria.
-2. If review or test handoffs already exist in the task's directory, this is rework. Fix everything they report.
+2. If review or test handoffs already exist in the task's directory, this is rework. Fix everything they report. For each finding with a `Class`, search for every instance of that class in your change and the code it touches, not only the cited lines and `Other places`, and fix them all.
 3. Implement. Run the Checks commands in your worktree. If you changed or added tests, run them several times to rule out flakiness.
 4. Commit on your branch with a clear message. Do not merge.
 5. Write the handoff file:
@@ -38,6 +38,8 @@ You implement one task in your own git worktree. The director assigns it with a 
    ## How each acceptance criterion is met
    ## Checks run and their results
    <command> -> exit <code>, <passed>/<total>
+   ## Class sweeps (rework only)
+   <class> -> searched <where>, fixed <file:line, ...>
    ## Open issues
    ```
 

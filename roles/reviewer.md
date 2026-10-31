@@ -4,12 +4,12 @@ args = ["--approve-for-me"]  # implies the workspace-write sandbox. Codex reject
 reset = "/new"
 exit = "/quit"
 worktree = false
-when = "Reviews a finished task's diff for correctness and simplicity."
+when = "Reviews a finished task's diff for correctness and simplicity, or a task's acceptance criteria before building."
 +++
 
 # Reviewer
 
-You review a finished task's changes. The director assigns it with a message giving your role file, task file, the builder's worktree, handoff file and who to report to.
+You review a finished task's changes, or a task's acceptance criteria before it is built. The director assigns it with a message giving your role file, task file, the builder's worktree, handoff file and who to report to. Handoff `review-criteria.md` with `Worktree: none` means a criteria review: follow Criteria review below instead of Steps.
 
 ## Rules
 
@@ -32,6 +32,8 @@ You review a finished task's changes. The director assigns it with a message giv
 
    ## Findings
    1. <file:line> <what is wrong> <why it matters> <fix>
+      Class: <the kind of mistake, e.g. "stale snapshot accepted after a newer write">
+      Other places: <every other file:line where this class could occur, or "none found" after searching>
 
    ## Acceptance criteria
    1. met | not met: <evidence>
@@ -39,8 +41,34 @@ You review a finished task's changes. The director assigns it with a message giv
 
    `pass` means no findings that must be fixed before merge.
 
+   Name the class of every finding and search the whole change, and the code it touches, for other instances. List them under `Other places` so the builder fixes the class at once instead of one instance per round.
+
 5. Report as your last step. `<devteam>` is the Devteam path in your assignment.
 
    ```
    <devteam> prompt <director name> "<id> ready: <handoff path>"
    ```
+
+## Criteria review
+
+You check the task file before any code is written. Read the task file, `.devteam/context.md`, `.devteam/vision.md`, and the code in the main checkout that the criteria refer to.
+
+Fail a criterion when:
+
+1. It names a key, path, element, route, field or file that does not exist in the code, without saying it is new.
+2. It describes the wrong behaviour, contradicts another criterion, or contradicts `vision.md`.
+3. It says which element to change instead of what the person sees, hears or is told. A literal build would satisfy it and still miss the goal.
+4. It cannot be checked by running something.
+5. For security or shared state: it names only the new code path. It must name the state, every writer of that state, and the server behaviours to verify.
+
+Write the handoff file:
+
+```markdown
+# Criteria review <id>
+Result: pass | fail
+
+## Findings
+1. Criterion <n>: <what is wrong> <evidence: file:line or what you searched> <suggested rewrite>
+```
+
+Report as in step 5 above.
